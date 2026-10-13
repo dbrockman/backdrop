@@ -24,7 +24,7 @@ The application is primarily a GUI, but its core functionality should also be ac
 - **Non-invasive:** Backdrop works with existing wallpaper directories and desktop environment configurations rather than imposing its own structure.
 - **Source-independent:** Wallpapers from different sources can coexist in the same library.
 - **Extensible:** Support additional online providers and desktop environments through modular interfaces.
-- **Portable:** User-created metadata should eventually be transferable between installations.
+- **Portable:** The library folder is self-contained. Images plus `.backdrop/` hold everything Backdrop cannot regenerate offline, in plain text that can be version-controlled and read without Backdrop.
 - **Responsive:** Large collections should remain fast to browse through indexing, thumbnail caching, and asynchronous processing.
 - **Safe:** Destructive file operations and Git operations should be explicit and predictable.
 
@@ -43,9 +43,9 @@ Requirements:
 - Support common image formats, initially JPEG, PNG, and WebP.
 - Recursively discover images in subdirectories.
 - Detect newly added, modified, moved, and deleted images.
-- Index image metadata in a local SQLite database.
+- Index image metadata in a local SQLite database that can be rebuilt from the library (§5.4).
 - Generate and cache thumbnails.
-- Reconcile the index with the filesystem when the application starts.
+- Reconcile the index and the library metadata with the filesystem when the application starts, following renamed and moved images by content hash (§5.3).
 - Handle missing or inaccessible files gracefully.
 - Avoid requiring images to be imported or renamed before use.
 
@@ -218,7 +218,7 @@ For example:
 
 `wallhaven-94x38z.jpg`
 
-The source association should also be stored in the metadata database so it does not depend exclusively on the filename.
+The source association is also stored in the library metadata (§5.2), so it does not depend on the filename and survives renames.
 
 When browsing online content, already-downloaded wallpapers should be visually distinguishable.
 
@@ -330,52 +330,30 @@ A future feature could preview how an image will be displayed on a particular mo
 
 ## 5. Metadata and Persistence
 
-### 5.1 SQLite database
+### 5.1 Where data lives
 
-Backdrop uses SQLite for local indexing and cached metadata.
+Data is placed by one rule: **can Backdrop regenerate it offline, from the library alone?**
 
-The database should store:
+- **No:** it is stored as text inside the library, in `.backdrop/`. These files are the source of truth. They can be version-controlled with the images, backed up, and read without Backdrop.
+- **Yes:** it lives in the SQLite index or the thumbnail cache, outside the library. Deleting either loses nothing but rebuild time, and rebuilding needs no network access.
+- **Machine- or user-specific settings and secrets** live in the XDG config directory, never in the library.
 
-- Indexed image records
-- File paths and filesystem information
-- Image dimensions and other technical metadata
-- Provider associations
-- Cached provider metadata
-- Provider tags
-- User-defined tags
-- Favorites
-- Thumbnail references
-- Indexing state
+| Data | Location |
+|---|---|
+| Favorites, user tags, future ratings and notes | Library (`.backdrop/metadata.toml`) |
+| Content hash of each image with metadata | Library (`.backdrop/metadata.toml`) |
+| Provider association (provider and ID) | Library (`.backdrop/metadata.toml`) |
+| Provider metadata snapshot (tags, URL, publication date, content rating, …) | Library (`.backdrop/sources/`) |
+| Paths, dimensions, file size, modification time, format | SQLite index |
+| Hash cache, tag and search indexes, indexing state | SQLite index |
+| Thumbnails | XDG cache directory |
+| API keys, appearance, desktop backend, window state | XDG config directory |
 
-The database should live outside the wallpaper directory, using an appropriate XDG application data location.
+Provider metadata is stored as text, not just cached, because a wallpaper can be deleted from the provider. Re-fetching cannot be relied on.
 
-### 5.2 Separate metadata categories
+**Open decision:** download rules (§3.6) describe the library's folder structure and may belong in `.backdrop/` rather than in XDG settings.
 
-Maintain a clear separation between three categories of information.
-
-**Filesystem metadata**
-
-Information derived from local image files, such as paths, dimensions, modification times, and file size.
-
-**Provider metadata**
-
-Information retrieved from online APIs, including provider IDs, tags, publication dates, and content ratings.
-
-This information can be cached and regenerated.
-
-**User metadata**
-
-Information explicitly created or modified through Backdrop, such as favorites, custom tags, and future organization preferences.
-
-This information should be preserved and preferably portable.
-
-### 5.3 Portable metadata
-
-Consider storing user-created metadata in human-readable text files within the wallpaper library.
-
-This would allow user metadata to be version-controlled and synchronized alongside the images.
-
-Possible structure:
+### 5.2 Library metadata files
 
 ```text
 Wallpapers/
@@ -384,18 +362,67 @@ Wallpapers/
   dark/
     another-wallpaper.jpg
   .backdrop/
-    metadata.json
+    metadata.toml
+    sources/
+      wallhaven/
+        94x38z.toml
 ```
 
-The portable metadata should store only information that must survive rebuilding the local database.
+`.backdrop/` is created only when there is something to write, so browsing a folder never modifies it.
 
-Provider cache data, thumbnails, transient UI state, and secrets should not be written into the wallpaper repository.
+**`metadata.toml`** holds one record per image that has user data or a provider association, keyed by its path relative to the library root. Images without metadata have no record.
 
-**Open decision:** Choose between one metadata file for the collection, multiple per-directory files, or per-image sidecar files.
+```toml
+["dark/wallhaven-94x38z.jpg"]
+hash = "blake3:9f2c…"
+favorite = true
+tags = ["mountains", "night"]
+source = "wallhaven/94x38z"
+```
 
-The implementation should account for renamed or moved files and avoid losing user metadata when file paths change.
+**`sources/<provider>/<id>.toml`** holds a snapshot of one remote item's provider metadata. It is keyed by provider ID rather than path, so renames never touch it, and it is written once when the image is downloaded or first matched to a provider.
 
-### 5.4 Thumbnail caching
+- Snapshots store normalized fields plus the time they were fetched, not raw API responses. Fields should be mapped generously, because unmapped fields are lost.
+- Refreshing a snapshot only happens on explicit request. If the provider no longer has the item, the snapshot is kept and marked as removed upstream, with the date.
+
+Writing rules:
+
+- Output is deterministic: sorted keys and stable formatting, so each change produces a minimal diff and edits from different machines to different images merge cleanly.
+- Writers re-read the file before changing it and replace it atomically, as with settings.
+- Changes are written to the text files first and then to the index. If Backdrop stops in between, the next start reconciles from the files.
+- The index records each metadata file's hash. When a file changes outside Backdrop (a `git pull`, a manual edit), its contents are re-imported.
+
+Provider cache data that can be re-fetched, thumbnails, transient UI state, and secrets are never written into the library.
+
+### 5.3 Renamed, moved, and deleted images
+
+Users may rename, move, and delete images outside Backdrop. Each scan reconciles `metadata.toml` with the filesystem:
+
+1. Walk the library and hash new or changed files. Unchanged files reuse the hash cached in the index, keyed by path, size, and modification time.
+2. **Path exists:** the record stays. If the hash changed, the file was edited in place; the metadata stays with the path and the hash is updated.
+3. **Path missing, same hash at an untracked path:** the image was renamed or moved, and the record moves to the new path. If several untracked copies match, the first by path is chosen.
+4. **Path missing, no match:** the image was deleted. Its record is removed, and so is its provider snapshot if no other record refers to it.
+
+All matching completes before anything is removed, so a move is never treated as a deletion.
+
+Records are only removed after a complete, successful scan:
+
+- If the library root is missing or unreadable, nothing is removed.
+- Records under a subdirectory that could not be read (permissions, I/O errors, an unavailable symlink target) are kept.
+- If one scan would remove a large share of the records (for example at least 25% and at least 20 images), Backdrop asks for confirmation before removing them. This protects against a checkout of an old Git branch, a drive that is not mounted, or a folder moved out by mistake.
+
+Known limits: an image that is both moved and edited between scans loses its metadata, and a copy of an image whose original still exists starts without metadata.
+
+### 5.4 SQLite index
+
+Backdrop uses SQLite, through `rusqlite` with SQLite bundled, as a rebuildable index of the library. SQLite was chosen because the GUI and CLI access it from separate processes at the same time, and because filtering, sorting, and tag autocomplete are naturally expressed as indexed queries.
+
+- The database lives in the XDG data directory, outside the library.
+- Only `backdrop-core` opens it, always in WAL mode with a busy timeout, so every process configures it the same way.
+- Its schema version is stored with `PRAGMA user_version`. On a version change the database is deleted and rebuilt from the library instead of migrated.
+- Queries run off the UI thread.
+
+### 5.5 Thumbnail caching
 
 Thumbnails are generated and cached locally.
 
@@ -585,8 +612,8 @@ The design must account for concurrent GUI and CLI access to the database.
 ### Reliability
 
 - Filesystem remains the source of truth for local images.
-- Database can be rebuilt without losing image files.
-- User-created metadata should remain recoverable.
+- The database can be deleted and rebuilt offline from the library without losing any data.
+- Metadata is never removed because of an incomplete scan, and removing a large share of it requires confirmation (§5.3).
 - Interrupted downloads must not be mistaken for completed images.
 - File deletion should use the system trash when available.
 - Failed network requests should not prevent local browsing.
@@ -615,10 +642,11 @@ The design must account for concurrent GUI and CLI access to the database.
 
 The goal is a useful offline wallpaper browser.
 
-- [ ] Rust application setup with GPUI and GPUI Kit
-- [ ] Settings persistence and library directory configuration
+- [x] Rust application setup with GPUI and GPUI Kit
+- [x] Settings persistence and library directory configuration
 - [ ] Recursive image discovery
-- [ ] SQLite database and image index
+- [ ] SQLite index, rebuildable from the library
+- [ ] Content hashing and library metadata reconciliation
 - [ ] Asynchronous thumbnail generation and caching
 - [ ] Image grid
 - [ ] Image detail view
@@ -633,7 +661,7 @@ The goal is a useful offline wallpaper browser.
 
 - [ ] Wallhaven provider implementation
 - [ ] Recognize Wallhaven filenames
-- [ ] Retrieve and cache remote metadata
+- [ ] Snapshot provider metadata into the library
 - [ ] Display provider tags
 - [ ] Search and browse Wallhaven
 - [ ] API-key configuration
@@ -650,7 +678,6 @@ The goal is a useful offline wallpaper browser.
 - [ ] Multi-selection and batch deletion
 - [ ] Git status detection
 - [ ] Git status indicators and filters
-- [ ] Portable user metadata
 - [ ] Additional sorting and filtering options
 
 ### Phase 4 — Enhancements
@@ -673,9 +700,8 @@ These questions can be resolved during implementation.
 
 | Topic | Question |
 |---|---|
-| Portable metadata | Single collection file, per-directory files, or sidecars? |
-| Metadata identity | How should custom metadata survive renaming or moving an image? |
 | Download rules | First matching rule or composable directory rules? |
+| Download rules location | Should download rules be stored in the library (`.backdrop/`) or in XDG settings? |
 | Downloaded indicators | Highlight, dim, hide, or provide a toggle? |
 | Content ratings | Should filtering apply to local images as well as online browsing? |
 | Niri integration | Which wallpaper services should the initial backend support? |
