@@ -77,6 +77,9 @@ pub struct SnapshotTag {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// The provider's id for the tag, to search for exactly this tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 impl Snapshot {
@@ -113,6 +116,7 @@ impl Snapshot {
                 .map(|tag| SnapshotTag {
                     name: tag.name.clone(),
                     category: tag.category.clone(),
+                    id: tag.id.clone(),
                 })
                 .collect(),
             unknown: toml::Table::new(),
@@ -198,6 +202,7 @@ mod tests {
         wallpaper.tags = Some(vec![Tag {
             name: "mountains".to_owned(),
             category: Some("Nature".to_owned()),
+            id: Some("328".to_owned()),
         }]);
         let fetched = chrono::Utc
             .with_ymd_and_hms(2026, 10, 13, 15, 31, 25)
@@ -213,12 +218,38 @@ mod tests {
         assert!(text.starts_with("version = 1\nprovider = \"wallhaven\"\nid = \"94x38z\"\n"));
         assert!(text.contains("fetched = 2026-10-13T15:31:25Z\n"));
         assert!(text.contains("uploaded = 2026-10-02T13:39:14\n"));
-        assert!(text.contains("[[tags]]\nname = \"mountains\"\ncategory = \"Nature\"\n"));
+        assert!(
+            text.contains("[[tags]]\nname = \"mountains\"\ncategory = \"Nature\"\nid = \"328\"\n")
+        );
         let loaded = Snapshot::load(library.path(), "wallhaven/94x38z")
             .unwrap()
             .unwrap();
         assert_eq!(loaded, snapshot);
         assert_eq!(loaded.rating(), Some(ContentRating::Sfw));
+    }
+
+    #[test]
+    fn snapshots_from_before_tag_ids_still_load() {
+        let library = tempfile::tempdir().unwrap();
+        let file = library
+            .path()
+            .join(".backdrop/sources/wallhaven/94x38z.toml");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            "version = 1\nprovider = \"wallhaven\"\nid = \"94x38z\"\n\
+             fetched = 2026-10-13T15:31:25Z\npage_url = \"https://wallhaven.cc/w/94x38z\"\n\
+             image_url = \"https://w.wallhaven.cc/full/94/wallhaven-94x38z.jpg\"\n\
+             width = 20\nheight = 10\nrating = \"sfw\"\n\n[[tags]]\nname = \"mountains\"\n",
+        )
+        .unwrap();
+
+        let snapshot = Snapshot::load(library.path(), "wallhaven/94x38z")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(snapshot.tags()[0].name, "mountains");
+        assert_eq!(snapshot.tags()[0].id, None);
     }
 
     #[test]

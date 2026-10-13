@@ -383,6 +383,7 @@ mod tests {
         matching.tags = Some(vec![Tag {
             name: "mountains".to_owned(),
             category: None,
+            id: None,
         }]);
 
         assert_eq!(folder(&rules, &matching), "nature/big");

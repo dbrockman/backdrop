@@ -165,6 +165,9 @@ pub struct SearchPage {
 pub struct Tag {
     pub name: String,
     pub category: Option<String>,
+    /// The provider's id for the tag, to search for exactly this tag rather
+    /// than its name as text.
+    pub id: Option<String>,
 }
 
 /// A wallpaper offered by a provider.
@@ -422,6 +425,7 @@ impl RemoteWallpaper {
                 .map(|name| Tag {
                     name: (*name).to_owned(),
                     category: None,
+                    id: None,
                 })
                 .collect(),
         );

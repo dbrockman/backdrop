@@ -256,6 +256,7 @@ mod tests {
             wallpaper.tags = Some(vec![Tag {
                 name: "mountains".to_owned(),
                 category: Some("Nature".to_owned()),
+                id: None,
             }]);
             Ok(wallpaper)
         }

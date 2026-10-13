@@ -499,6 +499,7 @@ struct Uploader {
 
 #[derive(Deserialize)]
 struct ApiTag {
+    id: Option<u64>,
     name: String,
     category: Option<String>,
 }
@@ -543,6 +544,7 @@ impl ApiWallpaper {
                     .map(|tag| Tag {
                         name: tag.name,
                         category: non_empty(tag.category),
+                        id: tag.id.map(|id| id.to_string()),
                     })
                     .collect()
             }),
@@ -776,10 +778,12 @@ mod tests {
                 Tag {
                     name: "mountains".to_owned(),
                     category: Some("Nature".to_owned()),
+                    id: Some("328".to_owned()),
                 },
                 Tag {
                     name: "space".to_owned(),
                     category: None,
+                    id: Some("32".to_owned()),
                 },
             ]
         );
