@@ -1081,6 +1081,42 @@ mod tests {
         assert_eq!(cx.update(|cx| browser.read(cx).selected_ix()), Some(2));
     }
     #[gpui_kit::test]
+    fn clicking_a_tag_shows_the_results_for_it(cx: &mut TestAppContext) {
+        let provider = std::sync::Arc::new(crate::test_provider::FakeProvider::new(vec![vec![
+            "aaa111", "bbb222",
+        ]]));
+        let (_dir, _paths, window, workspace) =
+            open_workspace_with(&[], Vec::new(), Some(provider.clone()), cx);
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("wallpaper-bbb222", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("search-tag-lake", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert!(cx.update(|cx| workspace.read(cx).wallhaven_detail.is_none()));
+        let searched = provider.searches().last().unwrap().clone();
+        assert_eq!(searched.tag.map(|tag| tag.name).as_deref(), Some("lake"));
+        assert_eq!(searched.page, 1);
+        // The new results start unselected, at the top.
+        let browser = cx.update(|cx| workspace.read(cx).wallhaven.clone().unwrap());
+        assert_eq!(cx.update(|cx| browser.read(cx).selected_ix()), None);
+    }
+    #[gpui_kit::test]
     fn stepping_quickly_only_loads_the_wallpaper_it_stops_on(cx: &mut TestAppContext) {
         let provider = std::sync::Arc::new(crate::test_provider::FakeProvider::new(vec![vec![
             "aaa111", "bbb222", "ccc333",

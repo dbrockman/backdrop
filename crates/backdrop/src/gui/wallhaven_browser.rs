@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use backdrop_core::image::Orientation;
 use backdrop_core::library::{Downloaded, Library};
-use backdrop_core::providers::{ContentRating, Provider, RemoteWallpaper, SearchQuery, SearchSort};
+use backdrop_core::providers::{
+    ContentRating, Provider, RemoteWallpaper, SearchQuery, SearchSort, Tag,
+};
 use backdrop_core::remote_images::RemoteThumbnails;
 use backdrop_core::settings::Settings;
 use gpui_kit::component::button::{
@@ -190,7 +192,13 @@ impl WallhavenBrowser {
         let query_subscription =
             cx.subscribe_in(&query_input, window, |this, input, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
-                    this.query.text = input.read(cx).value().trim().to_owned();
+                    let text = input.read(cx).value().trim().to_owned();
+                    // The field shows a clicked tag's name; editing it searches
+                    // the text instead.
+                    if this.query.tag.as_ref().is_some_and(|tag| tag.name != text) {
+                        this.query.tag = None;
+                    }
+                    this.query.text = text;
                     this.search(cx);
                     window.focus(&this.focus_handle, cx);
                 }
@@ -582,6 +590,17 @@ impl WallhavenBrowser {
         }
     }
 
+    /// Searches for wallpapers with exactly `tag`, showing its name in the
+    /// search field. The other filters stay as they are.
+    pub fn search_tag(&mut self, tag: Tag, window: &mut Window, cx: &mut Context<Self>) {
+        self.query_input.update(cx, |input, cx| {
+            input.set_value(tag.name.clone(), window, cx)
+        });
+        self.query.text = tag.name.clone();
+        self.query.tag = Some(tag);
+        self.search(cx);
+    }
+
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus_handle = self.query_input.read(cx).focus_handle(cx);
         window.focus(&focus_handle, cx);
@@ -970,10 +989,10 @@ impl WallhavenBrowser {
                     )
                     .into_any_element(),
                 Status::Ready => centered()
-                    .child(if self.query.text.is_empty() {
-                        "No wallpapers found".to_owned()
-                    } else {
-                        format!("No wallpapers match “{}”", self.query.text)
+                    .child(match &self.query.tag {
+                        Some(tag) => format!("No wallpapers tagged “{}”", tag.name),
+                        None if self.query.text.is_empty() => "No wallpapers found".to_owned(),
+                        None => format!("No wallpapers match “{}”", self.query.text),
                     })
                     .into_any_element(),
             };
@@ -1268,7 +1287,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::{LibraryChanged, LibraryLocation, WallhavenBrowser};
+    use super::{LibraryChanged, LibraryLocation, Tag, WallhavenBrowser};
     use crate::test_provider::FakeProvider;
 
     struct Fixture {
@@ -1458,6 +1477,36 @@ mod tests {
             cx.update(|cx| fixture.browser.read(cx).selected_ix()),
             Some(0)
         );
+    }
+    #[gpui_kit::test]
+    fn a_tag_search_lasts_until_the_field_is_edited(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+        let tag = Tag {
+            name: "lake".to_owned(),
+            category: None,
+            id: Some("32".to_owned()),
+        };
+        cx.update_window(fixture.window, |_, window, cx| {
+            fixture.browser.update(cx, |browser, cx| {
+                browser.search_tag(tag.clone(), window, cx)
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(fixture.provider.searches()[1].tag, Some(tag.clone()));
+
+        // Enter on the unchanged name repeats the tag search.
+        press(&fixture, "ctrl-f", cx);
+        press(&fixture, "enter", cx);
+        assert_eq!(fixture.provider.searches()[2].tag, Some(tag));
+
+        press(&fixture, "ctrl-f", cx);
+        cx.update_window(fixture.window, |_, window, cx| window.input("s", cx))
+            .unwrap();
+        press(&fixture, "enter", cx);
+        let searches = fixture.provider.searches();
+        assert_eq!(searches[3].tag, None);
+        assert_eq!(searches[3].text, "lakes");
     }
     /// Opens the API key dialog from the toolbar and types `key` into it.
     fn enter_api_key(fixture: &Fixture, key: &str, cx: &mut TestAppContext) {

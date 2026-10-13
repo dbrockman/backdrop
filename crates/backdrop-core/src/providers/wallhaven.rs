@@ -372,9 +372,18 @@ fn is_valid_id(id: &str) -> bool {
 /// The query parameters of a search, as the API names them.
 fn search_params(query: &SearchQuery) -> Result<Vec<(&'static str, String)>, ProviderError> {
     let mut params = Vec::new();
-    let text = query.text.trim();
+    let text = match &query.tag {
+        // Wallhaven's exact tag search; its tag ids are numbers.
+        Some(Tag { id: Some(id), .. })
+            if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            format!("id:{id}")
+        }
+        Some(tag) => tag.name.trim().to_owned(),
+        None => query.text.trim().to_owned(),
+    };
     if !text.is_empty() {
-        params.push(("q", text.to_owned()));
+        params.push(("q", text));
     }
     if let Some(unknown) = query
         .categories
@@ -672,6 +681,7 @@ mod tests {
         let server = TestServer::start(vec![(200, search_response(&[]))]);
         let query = SearchQuery {
             text: " mountain lake ".to_owned(),
+            tag: None,
             ratings: vec![ContentRating::Nsfw, ContentRating::Sfw],
             categories: vec!["general".to_owned(), "people".to_owned()],
             orientation: Some(Orientation::Portrait),
@@ -690,6 +700,31 @@ mod tests {
              &ratios=portrait&atleast=2560x1440&page=3&seed=abc123"
         );
         assert_eq!(request.header("x-api-key"), Some("secret"));
+    }
+
+    #[test]
+    fn a_tag_is_searched_by_its_id_instead_of_the_text() {
+        let tag = |id: Option<&str>| SearchQuery {
+            text: "ignored".to_owned(),
+            tag: Some(Tag {
+                name: "mountains".to_owned(),
+                category: None,
+                id: id.map(str::to_owned),
+            }),
+            ..SearchQuery::default()
+        };
+        let q = |query: &SearchQuery| {
+            search_params(query)
+                .unwrap()
+                .into_iter()
+                .find(|(name, _)| *name == "q")
+                .map(|(_, value)| value)
+        };
+
+        assert_eq!(q(&tag(Some("328"))).as_deref(), Some("id:328"));
+        // Without a usable id, the name is the best search there is.
+        assert_eq!(q(&tag(None)).as_deref(), Some("mountains"));
+        assert_eq!(q(&tag(Some("x y"))).as_deref(), Some("mountains"));
     }
 
     #[test]

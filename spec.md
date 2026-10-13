@@ -722,7 +722,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Download original images
 - [x] Detect already-downloaded images
 - [x] Download destination rules
-- [ ] Click a tag in the Wallhaven details view to search for that tag
+- [x] Click a tag in the Wallhaven details view to search for that tag
 
 ### Phase 3 — Organization and Git
 

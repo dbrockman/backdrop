@@ -105,6 +105,10 @@ pub enum SearchSort {
 pub struct SearchQuery {
     /// Words or tags, in the provider's search syntax. Empty browses everything.
     pub text: String,
+    /// Only wallpapers with exactly this tag, which replaces `text`. A tag
+    /// with an id is searched by it, so other tags and descriptions that
+    /// mention its name don't match.
+    pub tag: Option<Tag>,
     /// The content ratings to include. Empty means safe for work only.
     pub ratings: Vec<ContentRating>,
     /// The ids of the [`Category`]s to include. Empty means all of them.
@@ -123,6 +127,7 @@ impl Default for SearchQuery {
     fn default() -> Self {
         Self {
             text: String::new(),
+            tag: None,
             ratings: vec![ContentRating::Sfw],
             categories: Vec::new(),
             orientation: None,
@@ -391,7 +396,7 @@ impl fmt::Debug for dyn Provider {
 
 #[cfg(any(test, feature = "test-support"))]
 impl RemoteWallpaper {
-    /// A 20 × 10 safe-for-work wallpaper of `provider` with id `id`, without
+    /// A 20 Ã 10 safe-for-work wallpaper of `provider` with id `id`, without
     /// tags, as in search results.
     pub fn for_test(provider: &'static str, id: &str) -> Self {
         Self {

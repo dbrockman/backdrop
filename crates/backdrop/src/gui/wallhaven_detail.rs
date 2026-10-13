@@ -10,6 +10,8 @@
 //! until the selection has rested briefly, so stepping quickly through results
 //! neither spends the API's rate limit nor downloads images nobody looks at,
 //! and a full image still downloading when the user moves on is cancelled.
+//!
+//! Clicking a tag returns to the results, searching for exactly that tag.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,14 +19,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use backdrop_core::providers::{Provider, RemoteWallpaper};
+use backdrop_core::providers::{Provider, RemoteWallpaper, Tag};
 use backdrop_core::remote_images::{RemoteImageError, RemotePreviews};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
 use gpui_kit::component::link::Link;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
@@ -104,6 +105,13 @@ impl WallhavenDetail {
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    /// Shows the results for `tag`, leaving this view.
+    fn search_tag(&mut self, tag: Tag, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser
+            .update(cx, |browser, cx| browser.search_tag(tag, window, cx));
+        cx.emit(BackToResults);
     }
 
     fn shown(&self, cx: &App) -> Option<RemoteWallpaper> {
@@ -397,10 +405,17 @@ impl WallhavenDetail {
                     h_flex()
                         .flex_wrap()
                         .gap_1()
-                        .children(
-                            tags.iter()
-                                .map(|tag| Tag::secondary().small().child(tag.name.clone())),
-                        )
+                        .children(tags.iter().map(|tag| {
+                            let searched = tag.clone();
+                            Button::new(ElementId::Name(format!("search-tag-{}", tag.name).into()))
+                                .outline()
+                                .xsmall()
+                                .label(tag.name.clone())
+                                .tooltip(format!("Search for “{}”", tag.name))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.search_tag(searched.clone(), window, cx)
+                                }))
+                        }))
                         .into_any_element()
                 }
             }

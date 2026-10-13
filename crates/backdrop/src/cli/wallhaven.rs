@@ -173,6 +173,7 @@ impl SearchArgs {
     fn query(&self) -> SearchQuery {
         SearchQuery {
             text: self.query.join(" "),
+            tag: None,
             ratings: self.ratings.iter().map(|&rating| rating.into()).collect(),
             categories: self
                 .categories
