@@ -4,8 +4,10 @@
 //! NSFW wallpapers need the key of an account that allows them. The key goes
 //! only to the API, never to the image servers.
 
+use std::collections::VecDeque;
 use std::io::{Read as _, Write};
-use std::time::Duration;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use ureq::http::Response;
@@ -24,6 +26,9 @@ const API_URL: &str = "https://wallhaven.cc/api/v1";
 const FILE_PREFIX: &str = "wallhaven-";
 /// API responses are a few kilobytes; anything near this is not one.
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+/// Wallhaven allows this many API requests a minute.
+pub const RATE_LIMIT: usize = 45;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
 
 const CATEGORIES: &[Category] = &[
     Category {
@@ -59,6 +64,8 @@ pub struct Wallhaven {
     agent: ureq::Agent,
     api_url: String,
     api_key: Option<String>,
+    /// When recent API requests were sent, or are due to be sent.
+    sent: Mutex<VecDeque<Instant>>,
 }
 
 impl Wallhaven {
@@ -79,15 +86,26 @@ impl Wallhaven {
             agent: config.into(),
             api_url: api_url.into(),
             api_key: api_key.filter(|key| !key.is_empty()),
+            sent: Mutex::new(VecDeque::new()),
         }
     }
 
-    /// Sends an API request and checks its status.
+    /// Sends an API request and checks its status. Requests beyond Wallhaven's
+    /// rate limit wait until they are allowed, so a batch, such as linking a
+    /// whole library, slows down rather than fails.
     fn get(
         &self,
         path: &str,
         query: &[(&str, String)],
     ) -> Result<Response<ureq::Body>, ProviderError> {
+        let delay = {
+            let mut sent = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
+            let now = Instant::now();
+            let delay = rate_limit_delay(&mut sent, now, RATE_LIMIT, RATE_WINDOW);
+            sent.push_back(now + delay);
+            delay
+        };
+        std::thread::sleep(delay);
         let mut request = self
             .agent
             .get(format!("{}{path}", self.api_url))
@@ -263,6 +281,28 @@ impl Provider for Wallhaven {
         }
         // Image links and downloaded files.
         self.id_from_file_name(path.rsplit('/').next()?)
+    }
+}
+
+/// How long to wait before sending a request so that no `window` holds more
+/// than `limit` of them, given when earlier ones were sent. Forgets requests
+/// that have left the window.
+fn rate_limit_delay(
+    sent: &mut VecDeque<Instant>,
+    now: Instant,
+    limit: usize,
+    window: Duration,
+) -> Duration {
+    while sent
+        .front()
+        .is_some_and(|&time| now.saturating_duration_since(time) >= window)
+    {
+        sent.pop_front();
+    }
+    match sent.len().checked_sub(limit) {
+        None => Duration::ZERO,
+        // The request `limit` back must leave the window first.
+        Some(index) => (sent[index] + window).saturating_duration_since(now),
     }
 }
 
@@ -783,6 +823,29 @@ mod tests {
         let request = &server.requests()[1];
         assert_eq!(request.target, "/full/ly/wallhaven-lygg6r.jpg");
         assert_eq!(request.header("x-api-key"), None);
+    }
+
+    #[test]
+    fn requests_beyond_the_rate_limit_wait() {
+        let start = Instant::now();
+        let window = Duration::from_secs(60);
+        let mut sent = VecDeque::new();
+        let mut send = |at: Duration| {
+            let now = start + at;
+            let delay = rate_limit_delay(&mut sent, now, 3, window);
+            sent.push_back(now + delay);
+            delay
+        };
+
+        assert_eq!(send(Duration::ZERO), Duration::ZERO);
+        assert_eq!(send(Duration::from_secs(1)), Duration::ZERO);
+        assert_eq!(send(Duration::from_secs(2)), Duration::ZERO);
+        // The fourth waits for the first to leave the window, the fifth for
+        // the second.
+        assert_eq!(send(Duration::from_secs(10)), Duration::from_secs(50));
+        assert_eq!(send(Duration::from_secs(10)), Duration::from_secs(51));
+        // Long after, the window is empty again.
+        assert_eq!(send(Duration::from_secs(200)), Duration::ZERO);
     }
 
     #[test]

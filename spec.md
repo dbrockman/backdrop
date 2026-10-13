@@ -220,6 +220,8 @@ For example:
 
 The source association is also stored in the library metadata (§5.2), so it does not depend on the filename and survives renames.
 
+Recognizing a file name only reads the name: it shows where an image came from but writes nothing and makes no request. Linking makes the association permanent. It is an explicit action, since it writes `.backdrop/` and fetches the wallpaper's details: Backdrop checks that the image has the remote wallpaper's dimensions, so a misnamed file is not given another wallpaper's tags, then saves the provider snapshot and records the source. Requests are paced to the provider's rate limit, so linking a large library slows down rather than fails.
+
 When browsing online content, already-downloaded wallpapers should be visually distinguishable.
 
 Potential behavior, configurable later:
@@ -631,7 +633,7 @@ backdrop library [set <dir>]
 backdrop paths
 ```
 
-Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>`, `backdrop wallhaven download <id|link|file>… [--to <folder>]`, `backdrop rules` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide filtering and metadata editing.
+Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>`, `backdrop wallhaven download <id|link|file>… [--to <folder>]`, `backdrop wallhaven link [<image>…] [--dry-run]`, `backdrop rules` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide filtering and metadata editing.
 
 CLI operations should use the same settings, database, and core logic as the GUI.
 
@@ -701,7 +703,7 @@ The goal is a useful offline wallpaper browser.
 ### Phase 2 — Wallhaven
 
 - [x] Wallhaven provider implementation
-- [ ] Recognize Wallhaven filenames
+- [x] Recognize Wallhaven filenames
 - [x] Snapshot provider metadata into the library
 - [ ] Display provider tags
 - [ ] Search and browse Wallhaven

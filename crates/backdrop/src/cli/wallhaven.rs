@@ -5,8 +5,9 @@ use std::io::{self, BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail};
-use backdrop_core::library::Downloaded;
+use backdrop_core::library::{Downloaded, ImageSource};
 use backdrop_core::paths::AppPaths;
+use backdrop_core::providers::wallhaven::RATE_LIMIT;
 use backdrop_core::providers::{
     ContentRating, Provider, ProviderError, RemoteWallpaper, SearchQuery, SearchSort, Wallhaven,
 };
@@ -35,6 +36,16 @@ pub enum WallhavenCommand {
         /// are created.
         #[arg(long, value_name = "FOLDER")]
         to: Option<PathBuf>,
+    },
+    /// Link images named like Wallhaven downloads (wallhaven-<id>.jpg) to
+    /// their wallpapers: save the details and tags, and remember the source
+    /// even if the image is renamed.
+    Link {
+        /// The images to link; all unlinked ones if none are given.
+        images: Vec<PathBuf>,
+        /// Only print which images would be linked; nothing is fetched.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show whether an API key is set, or change it. NSFW wallpapers need one.
     ApiKey {
@@ -179,6 +190,7 @@ pub fn run(paths: &AppPaths, command: WallhavenCommand) -> anyhow::Result<()> {
     match command {
         WallhavenCommand::Search(args) => search(&client(settings_file)?, &args.query()),
         WallhavenCommand::Info { wallpaper } => info(&client(settings_file)?, &wallpaper),
+        WallhavenCommand::Link { images, dry_run } => link(paths, &images, dry_run),
         WallhavenCommand::Download { wallpapers, to } => {
             download(paths, &wallpapers, to.as_deref())
         }
@@ -366,6 +378,81 @@ fn progress_done() {
     }
 }
 
+/// Links the given images, or all unlinked ones, to the wallpapers their names
+/// refer to. Every image is tried even if some fail; the command fails if any
+/// did.
+fn link(paths: &AppPaths, images: &[PathBuf], dry_run: bool) -> anyhow::Result<()> {
+    let wallhaven = client(&paths.settings_file())?;
+    let (mut library, _) = super::scan(paths)?;
+    let sources = library.image_sources(&wallhaven)?;
+    let mut unlinked = Vec::new();
+    if images.is_empty() {
+        for (path, source) in &sources {
+            if let ImageSource::FileName(source) = source {
+                unlinked.push((path.clone(), source.clone()));
+            }
+        }
+    } else {
+        for image in images {
+            let path = library.relative_path(image)?;
+            match sources.get(&path) {
+                Some(ImageSource::FileName(source)) => unlinked.push((path, source.clone())),
+                Some(ImageSource::Recorded(source)) => {
+                    println!("already linked: {} -> {source}", image.display())
+                }
+                None => bail!(
+                    "{} is not named like a Wallhaven download, such as wallhaven-94x38z.jpg",
+                    image.display()
+                ),
+            }
+        }
+    }
+    if unlinked.is_empty() {
+        if images.is_empty() {
+            println!("no unlinked Wallhaven images");
+        }
+        return Ok(());
+    }
+    if dry_run {
+        for (path, source) in &unlinked {
+            println!(
+                "would link: {} -> {source}",
+                library.root().join(path).display()
+            );
+        }
+        return Ok(());
+    }
+    if unlinked.len() > RATE_LIMIT {
+        eprintln!(
+            "Linking {} images; Wallhaven allows {RATE_LIMIT} requests a minute, so \
+             this takes about {} minutes.",
+            unlinked.len(),
+            unlinked.len().div_ceil(RATE_LIMIT)
+        );
+    }
+
+    let mut failed = 0;
+    for (path, source) in &unlinked {
+        let file = library.root().join(path);
+        let id = source.rsplit('/').next().unwrap_or(source);
+        let result = wallhaven
+            .wallpaper(id)
+            .map_err(explain)
+            .and_then(|wallpaper| Ok(library.link_source(path, &wallpaper)?));
+        match result {
+            Ok(()) => println!("linked: {} -> {source}", file.display()),
+            Err(error) => {
+                eprintln!("error: {}: {error:#}", file.display());
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} images could not be linked", unlinked.len());
+    }
+    Ok(())
+}
+
 fn info(wallhaven: &Wallhaven, text: &str) -> anyhow::Result<()> {
     let Some(id) = wallhaven.parse_id(text) else {
         bail!("{text} is not a Wallhaven wallpaper id, link, or file name");
@@ -521,6 +608,25 @@ mod tests {
             }) if wallpapers.len() == 2 && to == Path::new("dark")
         ));
         assert!(Args::try_parse_from(["backdrop", "wallhaven", "download"]).is_err());
+    }
+
+    #[test]
+    fn link_takes_images_or_none() {
+        let args = Args::try_parse_from(["backdrop", "wallhaven", "link", "--dry-run"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Wallhaven {
+                command: WallhavenCommand::Link { images, dry_run: true }
+            }) if images.is_empty()
+        ));
+        let args =
+            Args::try_parse_from(["backdrop", "wallhaven", "link", "a.jpg", "b.jpg"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Wallhaven {
+                command: WallhavenCommand::Link { images, dry_run: false }
+            }) if images.len() == 2
+        ));
     }
 
     #[test]

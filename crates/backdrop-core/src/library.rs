@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod download;
+mod sources;
 
 use crate::download_rules::RulesError;
 use crate::image::ImageFile;
@@ -27,6 +28,7 @@ use crate::query::ImageOrder;
 use crate::snapshot::SnapshotError;
 
 pub use download::Downloaded;
+pub use sources::ImageSource;
 
 /// Removals above both limits in one scan need confirmation.
 const CONFIRM_REMOVALS_FROM_COUNT: usize = 20;
@@ -57,6 +59,10 @@ pub enum LibraryError {
     Rules(#[from] RulesError),
     #[error("{} can't hold downloads: use a folder inside the library that isn't hidden or a link", path.display())]
     InvalidDownloadFolder { path: PathBuf },
+    #[error("{} is not the same image as {source_name}: their dimensions differ", path.display())]
+    DifferentImage { path: PathBuf, source_name: String },
+    #[error("{} is already linked to {source_name}", path.display())]
+    AlreadyLinked { path: PathBuf, source_name: String },
     #[error("{} already exists", path.display())]
     FileExists { path: PathBuf },
     #[error("the download of {wallpaper} is not a usable image: {message}")]

@@ -7,10 +7,12 @@ use anyhow::bail;
 use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::download_rules::{DownloadRule, DownloadRules};
 use backdrop_core::image::{ImageFile, Orientation};
-use backdrop_core::library::{Library, LibraryScan, SystemTrash};
+use backdrop_core::library::{ImageSource, Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
+use backdrop_core::providers::Wallhaven;
 use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::settings::{LibraryStatus, Settings};
+use backdrop_core::snapshot::Snapshot;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::format;
@@ -241,12 +243,41 @@ fn info(paths: &AppPaths, image: &Path) -> anyhow::Result<()> {
             .flatten()
             .is_some_and(|current| current == file)
     });
-    print!("{}", describe(image, &file, favorite, wallpaper));
+    let source = library
+        .image_sources(&Wallhaven::new(None))?
+        .remove(image.path());
+    // Tags come from the snapshot saved when the image was linked.
+    let tags = match &source {
+        Some(ImageSource::Recorded(source)) => Snapshot::load(library.root(), source)
+            .ok()
+            .flatten()
+            .map(|snapshot| snapshot.tags().iter().map(|tag| tag.name.clone()).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let details = Details {
+        favorite,
+        wallpaper,
+        source,
+        tags,
+    };
+    print!("{}", describe(image, &file, &details));
     Ok(())
 }
 
+/// What `backdrop info` shows about an image beyond the index.
+#[derive(Default)]
+struct Details {
+    favorite: bool,
+    /// Whether the image is the wallpaper, if a desktop shell said.
+    wallpaper: Option<bool>,
+    source: Option<ImageSource>,
+    /// The provider's tags, from its snapshot.
+    tags: Vec<String>,
+}
+
 /// The lines `backdrop info` prints for `image`, whose absolute path is `file`.
-fn describe(image: &ImageFile, file: &Path, favorite: bool, wallpaper: Option<bool>) -> String {
+fn describe(image: &ImageFile, file: &Path, details: &Details) -> String {
     let yes_no = |value: bool| if value { "yes" } else { "no" };
     let orientation = orientation_name(image.orientation());
     let mut lines = vec![
@@ -263,10 +294,21 @@ fn describe(image: &ImageFile, file: &Path, favorite: bool, wallpaper: Option<bo
         ("file size", format::file_size(image.size())),
         ("added", format::date_time(image.added())),
         ("modified", format::date_time(image.modified())),
-        ("favorite", yes_no(favorite).to_owned()),
+        ("favorite", yes_no(details.favorite).to_owned()),
     ];
-    if let Some(wallpaper) = wallpaper {
+    if let Some(wallpaper) = details.wallpaper {
         lines.push(("wallpaper", yes_no(wallpaper).to_owned()));
+    }
+    match &details.source {
+        Some(ImageSource::Recorded(source)) => lines.push(("source", source.clone())),
+        Some(ImageSource::FileName(source)) => lines.push((
+            "source",
+            format!("{source} (from the file name; not linked)"),
+        )),
+        None => {}
+    }
+    if !details.tags.is_empty() {
+        lines.push(("tags", details.tags.join(", ")));
     }
     lines
         .into_iter()
@@ -608,7 +650,11 @@ mod tests {
     fn describe_prints_the_image_details() {
         let (_dir, library, images) = library();
         let file = library.root().join("a.png");
-        let text = describe(&images[0], &file, true, None);
+        let details = Details {
+            favorite: true,
+            ..Details::default()
+        };
+        let text = describe(&images[0], &file, &details);
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(lines[0], format!("path        {}", file.display()));
         assert_eq!(lines[1], "dimensions  1,920 × 1,080 (16:9, landscape)");
@@ -620,9 +666,23 @@ mod tests {
         // Without a desktop shell, whether it is the wallpaper is unknown.
         assert_eq!(lines.len(), 7);
 
-        let text = describe(&images[0], &file, false, Some(false));
+        let details = Details {
+            wallpaper: Some(false),
+            source: Some(ImageSource::FileName("wallhaven/94x38z".to_owned())),
+            ..Details::default()
+        };
+        let text = describe(&images[0], &file, &details);
         assert!(text.contains("favorite    no\n"));
-        assert!(text.ends_with("wallpaper   no\n"));
+        assert!(text.contains("wallpaper   no\n"));
+        assert!(text.ends_with("source      wallhaven/94x38z (from the file name; not linked)\n"));
+
+        let details = Details {
+            source: Some(ImageSource::Recorded("wallhaven/94x38z".to_owned())),
+            tags: vec!["mountains".to_owned(), "lake".to_owned()],
+            ..Details::default()
+        };
+        let text = describe(&images[0], &file, &details);
+        assert!(text.ends_with("source      wallhaven/94x38z\ntags        mountains, lake\n"));
     }
 
     #[test]

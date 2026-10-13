@@ -6,7 +6,6 @@
 //! existing file. Then the provider snapshot and the metadata record linking
 //! the image to its source are written, and the library is scanned.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -44,12 +43,9 @@ impl Library {
         if recorded.is_some() {
             return Ok(recorded);
         }
-        let named = indexed.into_keys().filter(|path| {
-            path.file_name()
-                .and_then(OsStr::to_str)
-                .and_then(|name| provider.id_from_file_name(name))
-                .is_some_and(|found| found == id)
-        });
+        let named = indexed
+            .into_keys()
+            .filter(|path| super::sources::id_from_path(provider, path).as_deref() == Some(id));
         Ok(named.min())
     }
 
