@@ -7,17 +7,18 @@
 use std::path::Path;
 
 use backdrop_core::image::ImageFile;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::format;
 use super::image_cache::LruImageCache;
-use super::library_grid::{LibraryGrid, ToggleFavorite};
+use super::library_grid::{LibraryGrid, SetWallpaper, ToggleFavorite};
 
 pub const KEY_CONTEXT: &str = "ImageDetail";
 
@@ -109,6 +110,10 @@ impl ImageDetail {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let path = image.path();
+        let grid = self.grid.read(cx);
+        let can_set_wallpaper = grid.has_desktop();
+        let is_current = grid.is_current_wallpaper(path);
+        let setting_wallpaper = grid.is_setting_wallpaper();
         let file = root.join(path);
         let name = path
             .file_name()
@@ -158,6 +163,25 @@ impl ImageDetail {
             .child(
                 v_flex()
                     .gap_2()
+                    .when(can_set_wallpaper, |actions| {
+                        actions.child(
+                            Button::new("set-wallpaper")
+                                .primary()
+                                .label(if is_current {
+                                    "Current Wallpaper"
+                                } else {
+                                    "Set as Wallpaper"
+                                })
+                                .disabled(is_current)
+                                .loading(setting_wallpaper)
+                                .tooltip("Show this image on the desktop (W)")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.grid.update(cx, |grid, cx| {
+                                        grid.set_selected_as_wallpaper(window, cx)
+                                    })
+                                })),
+                        )
+                    })
                     .child(
                         Button::new("favorite")
                             .outline()
@@ -213,6 +237,10 @@ impl Render for ImageDetail {
             .on_action(cx.listener(|_, _: &Back, _, cx| cx.emit(BackToGrid)))
             .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &NextImage, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &SetWallpaper, window, cx| {
+                this.grid
+                    .update(cx, |grid, cx| grid.set_selected_as_wallpaper(window, cx))
+            }))
             .on_action(cx.listener(|this, _: &ToggleFavorite, window, cx| {
                 this.grid
                     .update(cx, |grid, cx| grid.toggle_favorite(window, cx))

@@ -588,6 +588,7 @@ dependencies = [
  "backdrop-core",
  "chrono",
  "clap",
+ "fastrand",
  "gpui-kit",
  "image",
  "tempfile",

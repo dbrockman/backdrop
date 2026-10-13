@@ -4,6 +4,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
+use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::image::Orientation;
 use backdrop_core::library::{Library, LibraryScan};
 use backdrop_core::paths::AppPaths;
@@ -52,6 +53,23 @@ pub enum Command {
         /// Also remove metadata of missing images when there are many of them.
         #[arg(long)]
         remove_missing: bool,
+    },
+    /// Print the path of the current desktop wallpaper.
+    Current,
+    /// Show an image as the desktop wallpaper.
+    Set {
+        /// The image to show; it must be in the library.
+        #[arg(required_unless_present = "random", conflicts_with = "random")]
+        image: Option<PathBuf>,
+        /// Show a random image from the library, other than the current one.
+        #[arg(long)]
+        random: bool,
+        /// With --random, only pick images with this orientation.
+        #[arg(long, value_enum, requires = "random")]
+        orientation: Option<OrientationArg>,
+        /// With --random, only pick favorites.
+        #[arg(long, requires = "random")]
+        favorites: bool,
     },
     /// Print the library folder, or change it.
     Library {
@@ -132,6 +150,27 @@ pub fn run(command: Command) -> anyhow::Result<()> {
         Command::Library {
             command: Some(LibraryCommand::Set { dir }),
         } => set_library(&paths.settings_file(), &dir),
+        Command::Current => {
+            match desktop()?.current_wallpaper()? {
+                Some(path) => println!("{}", path.display()),
+                None => bail!("no wallpaper is set"),
+            }
+            Ok(())
+        }
+        Command::Set {
+            image,
+            random: _,
+            orientation,
+            favorites,
+        } => {
+            if image.is_some() && (favorites || orientation.is_some()) {
+                bail!("--orientation and --favorites only apply with --random");
+            }
+            let filter = ImageFilter::default()
+                .with_orientation(orientation.map(Into::into))
+                .with_favorites_only(favorites);
+            set_wallpaper(&paths, image.as_deref(), &filter)
+        }
         Command::Paths => {
             print_paths(&paths);
             Ok(())
@@ -172,6 +211,57 @@ fn set_favorite(paths: &AppPaths, images: &[PathBuf], favorite: bool) -> anyhow:
     for image in images {
         library.set_favorite(&image, favorite)?;
     }
+    Ok(())
+}
+
+fn desktop() -> anyhow::Result<Box<dyn WallpaperBackend>> {
+    match backdrop_core::desktop::detect() {
+        Some(backend) => Ok(backend),
+        None => bail!("no supported desktop shell is running; Backdrop works with Noctalia"),
+    }
+}
+
+/// Shows `image`, or a random library image matching `filter`, and prints its
+/// path. Scans first, so new images can be shown and chosen.
+fn set_wallpaper(
+    paths: &AppPaths,
+    image: Option<&Path>,
+    filter: &ImageFilter,
+) -> anyhow::Result<()> {
+    let desktop = desktop()?;
+    let (library, _) = scan(paths)?;
+    let images = library.images(ImageOrder::Path)?;
+    let path = match image {
+        Some(image) => {
+            let path = library.relative_path(image)?;
+            if !images.iter().any(|indexed| indexed.path() == path) {
+                bail!("{} is not an image in the library", image.display());
+            }
+            path
+        }
+        None => {
+            let favorites = library.favorites()?;
+            let current = desktop
+                .current_wallpaper()
+                .ok()
+                .flatten()
+                .and_then(|current| library.relative_path(&current).ok());
+            let candidates: Vec<_> = images
+                .iter()
+                .filter(|image| filter.matches(image, &favorites))
+                .filter(|image| Some(image.path()) != current.as_deref())
+                .collect();
+            if candidates.is_empty() {
+                bail!("no other images in the library match");
+            }
+            candidates[fastrand::usize(..candidates.len())]
+                .path()
+                .to_path_buf()
+        }
+    };
+    let file = library.root().join(&path);
+    desktop.set_wallpaper(&file)?;
+    println!("{}", file.display());
     Ok(())
 }
 
@@ -280,6 +370,14 @@ mod tests {
                 command: Some(LibraryCommand::Set { dir })
             }) if dir == Path::new("Wallpapers")
         ));
+    }
+
+    #[test]
+    fn set_takes_an_image_or_random() {
+        assert!(Args::try_parse_from(["backdrop", "set", "a.jpg"]).is_ok());
+        assert!(Args::try_parse_from(["backdrop", "set", "--random", "--favorites"]).is_ok());
+        assert!(Args::try_parse_from(["backdrop", "set"]).is_err());
+        assert!(Args::try_parse_from(["backdrop", "set", "a.jpg", "--random"]).is_err());
     }
 
     #[test]

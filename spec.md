@@ -307,11 +307,20 @@ Potential capabilities:
 
 Not all desktop backends will support every capability.
 
-### 4.3 Initial backend: Niri
+### 4.3 Initial backend: Noctalia
 
-The first implementation targets Niri, using the wallpaper service configured in the user's session.
+The first implementation targets the Noctalia desktop shell, which owns wallpaper state in the user's session (running on the Niri compositor). Backdrop talks to it through its command-line IPC:
 
-Niri itself is a compositor; the active wallpaper may be managed by another program. Backdrop therefore needs to integrate with the relevant wallpaper service rather than assuming Niri directly owns wallpaper state.
+| Command | Use |
+|---|---|
+| `noctalia msg wallpaper-get [connector]` | Read the current wallpaper path, for all outputs or one output |
+| `noctalia msg wallpaper-set [connector] <path>` | Set the wallpaper for all outputs or one output; Noctalia persists it |
+
+Noctalia's own `wallpaper-random`, `wallpaper-next`, and `wallpaper-previous` pick from Noctalia's configured wallpaper folder, not from the Backdrop library, so Backdrop chooses random wallpapers itself and sets them with `wallpaper-set`.
+
+The current wallpaper may be outside the Backdrop library; then no library image is marked as current.
+
+Noctalia has no command to watch for wallpaper changes, so Backdrop reads the current wallpaper at startup, after setting one, and when its window becomes active.
 
 Future desktop backends may include:
 
@@ -571,7 +580,7 @@ src/
     providers/
       wallhaven/
     desktop/
-      niri/
+      noctalia/
     git/
     settings/
   gui/
@@ -661,9 +670,9 @@ The goal is a useful offline wallpaper browser.
 - [x] Image grid
 - [x] Image detail view
 - [x] Filter by orientation and sort by date
-- [ ] Niri wallpaper integration
-- [ ] Highlight the current wallpaper
-- [ ] Set wallpaper
+- [x] Noctalia wallpaper integration
+- [x] Highlight the current wallpaper
+- [x] Set wallpaper
 - [ ] Delete images using system trash
 - [ ] Basic shared CLI functionality
 
@@ -714,7 +723,6 @@ These questions can be resolved during implementation.
 | Download rules location | Should download rules be stored in the library (`.backdrop/`) or in XDG settings? |
 | Downloaded indicators | Highlight, dim, hide, or provide a toggle? |
 | Content ratings | Should filtering apply to local images as well as online browsing? |
-| Niri integration | Which wallpaper services should the initial backend support? |
 | Multi-monitor | How should images be highlighted if different monitors use different wallpapers? |
 | Tag filtering | Should matching default to AND or OR? |
 | Git integration | How should untracked and deleted images appear in the gallery? |
@@ -733,7 +741,7 @@ The first usable version of Backdrop should allow a user to:
 3. Open an image to view its metadata and a larger preview.
 4. Filter images by orientation and sort by date.
 5. See which image is currently being used as the desktop wallpaper.
-6. Set a different wallpaper through the supported Niri integration.
+6. Set a different wallpaper through the supported Noctalia integration.
 7. Delete unwanted images safely.
 8. Restart the application without requiring a full rebuild of its thumbnail cache.
 

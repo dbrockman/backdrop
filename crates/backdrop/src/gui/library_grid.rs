@@ -10,6 +10,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::image::ImageFile;
 use backdrop_core::image::Orientation;
 use backdrop_core::library::Library;
@@ -44,6 +45,7 @@ actions!(
         SelectFirst,
         SelectLast,
         OpenSelected,
+        SetWallpaper,
         ToggleFavorite
     ]
 );
@@ -83,6 +85,13 @@ pub struct LibraryGrid {
     thumbnails: HashMap<PathBuf, Thumbnail>,
     /// The selected image, by path so it survives reordering.
     selected: Option<PathBuf>,
+    /// The desktop shell, once detected; `None` while detecting or when no
+    /// supported shell runs.
+    desktop: Option<Arc<dyn WallpaperBackend>>,
+    /// The library image shown as the desktop wallpaper, if any.
+    current_wallpaper: Option<PathBuf>,
+    /// A request to set the wallpaper is in progress.
+    setting_wallpaper: bool,
     /// Width of the grid from the last layout, used to pick the column count.
     width: Pixels,
     /// Columns of the frame being drawn. Fixed at render time: the width can
@@ -109,6 +118,9 @@ impl LibraryGrid {
             favorites: HashSet::new(),
             thumbnails: HashMap::new(),
             selected: None,
+            desktop: None,
+            current_wallpaper: None,
+            setting_wallpaper: false,
             width: px(0.),
             columns: 1,
             scroll_handle: UniformListScrollHandle::new(),
@@ -244,6 +256,90 @@ impl LibraryGrid {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Uses `desktop` to show and set wallpapers; `None` when no supported
+    /// shell runs.
+    pub fn set_desktop(
+        &mut self,
+        desktop: Option<Arc<dyn WallpaperBackend>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.desktop = desktop;
+        self.current_wallpaper = None;
+        self.refresh_current_wallpaper(cx);
+        cx.notify();
+    }
+
+    /// Whether a supported desktop shell is running, so wallpapers can be set.
+    pub fn has_desktop(&self) -> bool {
+        self.desktop.is_some()
+    }
+
+    pub fn is_current_wallpaper(&self, path: &Path) -> bool {
+        self.current_wallpaper.as_deref() == Some(path)
+    }
+
+    pub fn is_setting_wallpaper(&self) -> bool {
+        self.setting_wallpaper
+    }
+
+    /// Asks the desktop shell which image is the wallpaper. The shell can't
+    /// report changes, so this runs again when the window becomes active.
+    pub fn refresh_current_wallpaper(&mut self, cx: &mut Context<Self>) {
+        let Some(desktop) = self.desktop.clone() else {
+            return;
+        };
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let current = cx
+                .background_spawn(async move {
+                    let path = desktop.current_wallpaper().ok()??;
+                    // The library root is stored resolved, so resolve this too.
+                    let path = std::fs::canonicalize(path).ok()?;
+                    Some(path.strip_prefix(&root).ok()?.to_path_buf())
+                })
+                .await;
+            this.update(cx, |grid, cx| {
+                if grid.current_wallpaper != current {
+                    grid.current_wallpaper = current;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows the selected image as the desktop wallpaper.
+    pub fn set_selected_as_wallpaper(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(desktop), Some(path)) = (self.desktop.clone(), self.selected.clone()) else {
+            return;
+        };
+        if self.setting_wallpaper || self.is_current_wallpaper(&path) {
+            return;
+        }
+        self.setting_wallpaper = true;
+        cx.notify();
+        let file = self.root.join(&path);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { desktop.set_wallpaper(&file) })
+                .await;
+            this.update_in(cx, |grid, window, cx| {
+                grid.setting_wallpaper = false;
+                match result {
+                    Ok(()) => grid.current_wallpaper = Some(path),
+                    Err(error) => window.push_notification(
+                        Notification::error(error.to_string()).title("Couldn't set the wallpaper"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The images in display order.
@@ -435,6 +531,21 @@ impl LibraryGrid {
                         .text_color(theme.warning)
                         .child(Icon::new(IconName::StarFill).small()),
                 )
+            })
+            // Labelled in words: the badge must not rely on color alone.
+            .when(self.is_current_wallpaper(path), |picture| {
+                picture.child(
+                    div()
+                        .absolute()
+                        .top_1p5()
+                        .left_1p5()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(theme.background.opacity(0.85))
+                        .text_xs()
+                        .child("Current"),
+                )
             });
 
         div()
@@ -499,6 +610,9 @@ impl Render for LibraryGrid {
             .on_action(cx.listener(|grid, _: &SelectLast, _, cx| {
                 let last = grid.images.len().saturating_sub(1);
                 grid.select(last, cx)
+            }))
+            .on_action(cx.listener(|grid, _: &SetWallpaper, window, cx| {
+                grid.set_selected_as_wallpaper(window, cx)
             }))
             .on_action(cx.listener(|grid, _: &OpenSelected, _, cx| {
                 if grid.selected.is_some() {
@@ -886,5 +1000,69 @@ mod tests {
         assert_eq!(shown(cx), 1);
         click("favorites-only", cx);
         assert_eq!(shown(cx), 3);
+    }
+
+    /// A desktop shell that keeps the wallpaper in memory.
+    struct FakeDesktop(std::sync::Mutex<Option<PathBuf>>);
+
+    impl backdrop_core::desktop::WallpaperBackend for FakeDesktop {
+        fn name(&self) -> &'static str {
+            "Fake"
+        }
+
+        fn current_wallpaper(
+            &self,
+        ) -> Result<Option<PathBuf>, backdrop_core::desktop::DesktopError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn set_wallpaper(
+            &self,
+            image: &std::path::Path,
+        ) -> Result<(), backdrop_core::desktop::DesktopError> {
+            *self.0.lock().unwrap() = Some(image.to_path_buf());
+            Ok(())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn w_sets_the_selected_image_as_wallpaper(cx: &mut TestAppContext) {
+        let fixture = library(3);
+        let (window, grid) = open_grid(&fixture, cx);
+        let path = |ix: usize, cx: &mut TestAppContext| {
+            cx.update(|cx| grid.read(cx).images()[ix].path().to_path_buf())
+        };
+        let (first, second) = (path(0, cx), path(1, cx));
+        let desktop = std::sync::Arc::new(FakeDesktop(std::sync::Mutex::new(Some(
+            fixture.root.join(&first),
+        ))));
+        let shared = desktop.clone();
+        cx.update(|cx| grid.update(cx, |grid, cx| grid.set_desktop(Some(shared), cx)));
+        cx.run_until_parked();
+        let is_current = |path: &PathBuf, cx: &mut TestAppContext| {
+            cx.update(|cx| grid.read(cx).is_current_wallpaper(path))
+        };
+        assert!(is_current(&first, cx));
+
+        let id: SharedString = second.to_string_lossy().into_owned().into();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click(id.clone(), cx);
+            window.press("w", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(*desktop.0.lock().unwrap(), Some(fixture.root.join(&second)));
+        assert!(is_current(&second, cx));
+        assert!(!is_current(&first, cx));
+
+        // Pressing W on the current wallpaper changes nothing.
+        *desktop.0.lock().unwrap() = None;
+        cx.update_window(window, |_, window, cx| window.press("w", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(*desktop.0.lock().unwrap(), None);
     }
 }

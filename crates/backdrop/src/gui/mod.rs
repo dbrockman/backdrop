@@ -13,7 +13,7 @@ use gpui_kit::*;
 use image_detail::{Back, NextImage, PreviousImage};
 use library_grid::{
     OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
-    ToggleFavorite,
+    SetWallpaper, ToggleFavorite,
 };
 use workspace::{ChooseLibraryFolder, Workspace};
 
@@ -47,7 +47,7 @@ pub fn run(paths: AppPaths) {
                 ..TitleBar::window_options()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Workspace::new(paths, window, cx))
+                cx.new(|cx| Workspace::new(paths, backdrop_core::desktop::detect, window, cx))
             })
             .expect("failed to open the main window");
             cx.activate(true);
@@ -68,6 +68,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", SelectLast, Some(grid)),
         KeyBinding::new("f", ToggleFavorite, Some(grid)),
         KeyBinding::new("enter", OpenSelected, Some(grid)),
+        KeyBinding::new("w", SetWallpaper, Some(grid)),
+        KeyBinding::new("w", SetWallpaper, Some(detail)),
         KeyBinding::new("escape", Back, Some(detail)),
         KeyBinding::new("left", PreviousImage, Some(detail)),
         KeyBinding::new("right", NextImage, Some(detail)),

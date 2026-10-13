@@ -12,6 +12,7 @@ anyhow.workspace = true
 backdrop-core.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap.workspace = true
+fastrand.workspace = true
 gpui-kit.workspace = true
 
 [dev-dependencies]

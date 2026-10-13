@@ -1,5 +1,7 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::library::{Library, LibraryScan};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::settings::{LibraryStatus, Settings};
@@ -51,13 +53,48 @@ pub struct Workspace {
     /// The image shown in full, over the grid.
     detail: Option<Entity<ImageDetail>>,
     _detail_subscription: Option<Subscription>,
+    /// The desktop shell, once detected; given to each new grid.
+    desktop: Option<Arc<dyn WallpaperBackend>>,
+    _activation_subscription: Subscription,
     focus_handle: FocusHandle,
 }
 
+/// Finds the desktop shell that shows wallpapers, if a supported one runs.
+pub type DetectDesktop = fn() -> Option<Box<dyn WallpaperBackend>>;
+
 impl Workspace {
-    pub fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `detect_desktop` finds the desktop shell; tests pass a fake one.
+    pub fn new(
+        paths: AppPaths,
+        detect_desktop: DetectDesktop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+
+        cx.spawn(async move |this, cx| {
+            let desktop = cx.background_spawn(async move { detect_desktop() }).await;
+            this.update(cx, |this, cx| {
+                this.desktop = desktop.map(Arc::from);
+                if let Some(grid) = &this.grid {
+                    let desktop = this.desktop.clone();
+                    grid.update(cx, |grid, cx| grid.set_desktop(desktop, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+
+        // The shell can't report wallpaper changes, so check whenever the user
+        // comes back to Backdrop.
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active()
+                && let Some(grid) = &this.grid
+            {
+                grid.update(cx, |grid, cx| grid.refresh_current_wallpaper(cx));
+            }
+        });
 
         let settings_file = paths.settings_file();
         cx.spawn_in(window, async move |this, cx| {
@@ -87,6 +124,8 @@ impl Workspace {
             _grid_subscription: None,
             detail: None,
             _detail_subscription: None,
+            desktop: None,
+            _activation_subscription: activation,
             focus_handle,
         }
     }
@@ -151,7 +190,12 @@ impl Workspace {
             Some(grid) => grid.update(cx, |grid, cx| grid.reload(cx)),
             None => {
                 let paths = self.paths.clone();
-                let grid = cx.new(|cx| LibraryGrid::new(root, paths, cx));
+                let desktop = self.desktop.clone();
+                let grid = cx.new(|cx| {
+                    let mut grid = LibraryGrid::new(root, paths, cx);
+                    grid.set_desktop(desktop, cx);
+                    grid
+                });
                 self._grid_subscription = Some(cx.subscribe_in(
                     &grid,
                     window,
@@ -540,7 +584,7 @@ mod tests {
         let mut workspace = None;
         let window_paths = paths.clone();
         let handle = cx.open_window(size(px(800.), px(600.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(window_paths, window, cx));
+            let view = cx.new(|cx| Workspace::new(window_paths, || None, window, cx));
             workspace = Some(view.clone());
             Root::new(view, window, cx)
         });
