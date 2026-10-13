@@ -5,7 +5,7 @@
 //! the background in display order; a tile shows a placeholder until its
 //! thumbnail is ready.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use backdrop_core::image::ImageFile;
 use backdrop_core::image::Orientation;
 use backdrop_core::library::{Library, Trash};
 use backdrop_core::paths::AppPaths;
-use backdrop_core::query::{ImageFilter, ImageOrder};
+use backdrop_core::query::{ImageFilter, ImageMarks, ImageOrder};
 use backdrop_core::thumbnails::Thumbnails;
 use gpui_kit::component::button::{
     Button, ButtonVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
@@ -74,7 +74,8 @@ pub struct LibraryGrid {
     images: Arc<Vec<ImageFile>>,
     order: ImageOrder,
     filter: ImageFilter,
-    favorites: HashSet<PathBuf>,
+    /// Favorites and tags, for the filter and the tiles.
+    marks: ImageMarks,
     /// Keyed by image path; images without an entry are still being prepared.
     thumbnails: HashMap<PathBuf, Thumbnail>,
     /// The selected image, by path so it survives reordering.
@@ -117,7 +118,7 @@ impl LibraryGrid {
             images: Arc::new(Vec::new()),
             order: ImageOrder::default(),
             filter: ImageFilter::default(),
-            favorites: HashSet::new(),
+            marks: ImageMarks::default(),
             thumbnails: HashMap::new(),
             selected: None,
             desktop: None,
@@ -138,7 +139,7 @@ impl LibraryGrid {
         &self.focus_handle
     }
 
-    /// Reads the images and favorites from the index, which the caller has
+    /// Reads the images, favorites, and tags from the index, which the caller has
     /// just brought up to date.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self._load_task = Self::load(&self.root, &self.paths, self.order, cx);
@@ -151,18 +152,18 @@ impl LibraryGrid {
             let loaded = cx
                 .background_spawn(async move {
                     let library = Library::open(&root, &database)?;
-                    anyhow::Ok((library.images(order)?, library.favorites()?))
+                    anyhow::Ok((library.images(order)?, library.marks()?))
                 })
                 .await;
             // A failed load leaves the grid as it was; the scan that preceded
             // it has already reported problems with the index.
-            let Ok((images, favorites)) = loaded else {
+            let Ok((images, marks)) = loaded else {
                 return;
             };
             this.update(cx, |grid, cx| {
                 grid.all = images;
                 grid.loaded = true;
-                grid.favorites = favorites;
+                grid.marks = marks;
                 grid.apply_filter(cx);
             })
             .ok();
@@ -189,7 +190,7 @@ impl LibraryGrid {
         let images = self
             .all
             .iter()
-            .filter(|image| self.filter.matches(image, &self.favorites))
+            .filter(|image| self.filter.matches(image, &self.marks))
             .cloned()
             .collect();
         self.images = Arc::new(images);
@@ -381,7 +382,7 @@ impl LibraryGrid {
     fn remove_from_view(&mut self, path: &Path, cx: &mut Context<Self>) {
         let ix = self.images.iter().position(|image| image.path() == path);
         self.all.retain(|image| image.path() != path);
-        self.favorites.remove(path);
+        self.marks.remove(path);
         self.thumbnails.remove(path);
         self.apply_filter(cx);
         if self.selected.as_deref() == Some(path) {
@@ -430,7 +431,7 @@ impl LibraryGrid {
     }
 
     pub fn is_favorite(&self, path: &Path) -> bool {
-        self.favorites.contains(path)
+        self.marks.is_favorite(path)
     }
 
     /// The cached thumbnail of the image at `path`, once it exists.
@@ -476,7 +477,7 @@ impl LibraryGrid {
         let Some(path) = self.selected.clone() else {
             return;
         };
-        let favorite = !self.favorites.contains(&path);
+        let favorite = !self.marks.is_favorite(&path);
         // Shown at once; undone below if saving fails.
         self.set_favorite_shown(&path, favorite, cx);
         let root = self.root.clone();
@@ -504,11 +505,7 @@ impl LibraryGrid {
     }
 
     fn set_favorite_shown(&mut self, path: &Path, favorite: bool, cx: &mut Context<Self>) {
-        if favorite {
-            self.favorites.insert(path.to_path_buf());
-        } else {
-            self.favorites.remove(path);
-        }
+        self.marks.set_favorite(path, favorite);
         if self.filter.is_favorites_only() {
             self.apply_filter(cx);
         }
@@ -598,7 +595,7 @@ impl LibraryGrid {
             .overflow_hidden()
             .bg(theme.muted)
             .child(content)
-            .when(self.favorites.contains(path), |picture| {
+            .when(self.marks.is_favorite(path), |picture| {
                 picture.child(
                     div()
                         .absolute()
@@ -1025,7 +1022,7 @@ mod tests {
                 .favorites()
                 .unwrap()
         };
-        assert!(cx.update(|cx| grid.read(cx).favorites.contains(&path)));
+        assert!(cx.update(|cx| grid.read(cx).is_favorite(&path)));
         assert_eq!(favorites(&fixture).into_iter().collect::<Vec<_>>(), [path]);
 
         cx.update_window(window, |_, window, cx| window.press("f", cx))

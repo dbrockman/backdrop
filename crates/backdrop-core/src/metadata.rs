@@ -225,6 +225,21 @@ impl ImageMetadata {
     }
 }
 
+/// The longest tag, in characters.
+pub const MAX_TAG_LENGTH: usize = 64;
+
+/// A user tag as it is stored: trimmed, with runs of whitespace made single
+/// spaces. `None` for an empty tag or one longer than [`MAX_TAG_LENGTH`].
+pub fn normalize_tag(text: &str) -> Option<String> {
+    let tag = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!tag.is_empty() && tag.chars().count() <= MAX_TAG_LENGTH).then_some(tag)
+}
+
+/// Whether two tags are the same tag: tags ignore case.
+pub fn same_tag(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
 /// Where the provider snapshot for `source` (`provider/id`) is stored, or
 /// `None` if `source` is not a valid source ID. Validation keeps a crafted
 /// metadata file from pointing outside `.backdrop/sources/`.
@@ -359,6 +374,19 @@ mod tests {
                 .insert(Path::new("../x.jpg"), record("x"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn tags_are_trimmed_and_limited() {
+        assert_eq!(
+            normalize_tag("  snowy \t peaks "),
+            Some("snowy peaks".to_owned())
+        );
+        assert_eq!(normalize_tag(" \n "), None);
+        assert_eq!(normalize_tag(&"a".repeat(64)), Some("a".repeat(64)));
+        assert_eq!(normalize_tag(&"a".repeat(65)), None);
+        assert!(same_tag("Night", "night"));
+        assert!(same_tag("Ärger", "ärger"));
     }
 
     #[test]

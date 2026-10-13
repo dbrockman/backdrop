@@ -137,6 +137,8 @@ The system should eventually support:
 
 Tags originating from providers and tags created by users are stored separately, but both should be searchable.
 
+**Decided:** selecting several tags matches images that have all of them (AND). User tags are trimmed, runs of whitespace become single spaces, and they are 1 to 64 characters long. Tags ignore case: a tag is added only once, in the spelling first used, and filtering by `night` finds `Night`.
+
 ### 2.6 Deleting images
 
 Users can delete images directly from the library.
@@ -633,6 +635,9 @@ backdrop scan [--remove-missing]
 backdrop delete <image>…
 backdrop favorite <image>…
 backdrop unfavorite <image>…
+backdrop tag <image> <tag>…
+backdrop untag <image> <tag>…
+backdrop tags
 backdrop library [set <dir>]
 backdrop paths
 ```
@@ -750,7 +755,6 @@ These questions can be resolved during implementation.
 |---|---|
 | Content ratings | Should filtering apply to local images as well as online browsing? |
 | Multi-monitor | How should images be highlighted if different monitors use different wallpapers? |
-| Tag filtering | Should matching default to AND or OR? |
 | Git integration | How should untracked and deleted images appear in the gallery? |
 | Review workflow | Is a dedicated keep/discard mode more useful than ordinary batch deletion? |
 | Folder changes | How should changing the library root affect existing metadata and cache records? |

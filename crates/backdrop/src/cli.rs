@@ -12,7 +12,6 @@ use backdrop_core::paths::AppPaths;
 use backdrop_core::providers::Wallhaven;
 use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::settings::{LibraryStatus, Settings};
-use backdrop_core::snapshot::Snapshot;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::format;
@@ -46,6 +45,10 @@ pub enum Command {
         /// Only list favorites.
         #[arg(long)]
         favorites: bool,
+        /// Only list images with this tag, yours or a provider's; repeat it to
+        /// require several.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
     },
     /// Print the details of an image in the library.
     Info { image: PathBuf },
@@ -64,6 +67,20 @@ pub enum Command {
         #[arg(required = true)]
         images: Vec<PathBuf>,
     },
+    /// Add tags to an image.
+    Tag {
+        image: PathBuf,
+        #[arg(required = true)]
+        tags: Vec<String>,
+    },
+    /// Remove tags from an image.
+    Untag {
+        image: PathBuf,
+        #[arg(required = true)]
+        tags: Vec<String>,
+    },
+    /// Print every tag in the library with how many images have it.
+    Tags,
     /// Update the index and metadata with new, changed, moved, and removed images.
     Scan {
         /// Also remove metadata of missing images when there are many of them.
@@ -86,6 +103,10 @@ pub enum Command {
         /// With --random, only pick favorites.
         #[arg(long, requires = "random")]
         favorites: bool,
+        /// With --random, only pick images with this tag; repeat it to require
+        /// several.
+        #[arg(long = "tag", value_name = "TAG", requires = "random")]
+        tags: Vec<String>,
     },
     /// Print the library folder, or change it.
     Library {
@@ -160,16 +181,21 @@ pub fn run(command: Command) -> anyhow::Result<()> {
             sort,
             orientation,
             favorites,
+            tags,
         } => {
             let filter = ImageFilter::default()
                 .with_orientation(orientation.map(Into::into))
-                .with_favorites_only(favorites);
+                .with_favorites_only(favorites)
+                .with_tags(tags);
             list(&paths, sort.into(), &filter)
         }
         Command::Info { image } => info(&paths, &image),
         Command::Delete { images } => delete(&paths, &images),
         Command::Favorite { images } => set_favorite(&paths, &images, true),
         Command::Unfavorite { images } => set_favorite(&paths, &images, false),
+        Command::Tag { image, tags } => change_tags(&paths, &image, &tags, true),
+        Command::Untag { image, tags } => change_tags(&paths, &image, &tags, false),
+        Command::Tags => print_tags(&paths),
         Command::Scan { remove_missing } => scan_command(&paths, remove_missing),
         Command::Library { command: None } => print_library(&paths.settings_file()),
         Command::Library {
@@ -187,13 +213,15 @@ pub fn run(command: Command) -> anyhow::Result<()> {
             random: _,
             orientation,
             favorites,
+            tags,
         } => {
-            if image.is_some() && (favorites || orientation.is_some()) {
-                bail!("--orientation and --favorites only apply with --random");
+            if image.is_some() && (favorites || orientation.is_some() || !tags.is_empty()) {
+                bail!("--orientation, --favorites, and --tag only apply with --random");
             }
             let filter = ImageFilter::default()
                 .with_orientation(orientation.map(Into::into))
-                .with_favorites_only(favorites);
+                .with_favorites_only(favorites)
+                .with_tags(tags);
             set_wallpaper(&paths, image.as_deref(), &filter)
         }
         Command::Paths => {
@@ -209,10 +237,10 @@ pub fn run(command: Command) -> anyhow::Result<()> {
 /// checks file sizes and modification times.
 fn list(paths: &AppPaths, order: ImageOrder, filter: &ImageFilter) -> anyhow::Result<()> {
     let (library, _) = scan(paths)?;
-    let favorites = library.favorites()?;
+    let marks = library.marks()?;
     let mut out = io::stdout().lock();
     for image in library.images(order)? {
-        if !filter.matches(&image, &favorites) {
+        if !filter.matches(&image, &marks) {
             continue;
         }
         let line = writeln!(out, "{}", library.root().join(image.path()).display());
@@ -234,7 +262,7 @@ fn info(paths: &AppPaths, image: &Path) -> anyhow::Result<()> {
     let (library, _) = scan(paths)?;
     let images = library.images(ImageOrder::Path)?;
     let image = find_image(&library, &images, image)?;
-    let favorite = library.favorites()?.contains(image.path());
+    let marks = library.marks()?;
     let file = library.root().join(image.path());
     let wallpaper = backdrop_core::desktop::detect().map(|desktop| {
         desktop
@@ -243,23 +271,14 @@ fn info(paths: &AppPaths, image: &Path) -> anyhow::Result<()> {
             .flatten()
             .is_some_and(|current| current == file)
     });
-    let source = library
-        .image_sources(&Wallhaven::new(None))?
-        .remove(image.path());
-    // Tags come from the snapshot saved when the image was linked.
-    let tags = match &source {
-        Some(ImageSource::Recorded(source)) => Snapshot::load(library.root(), source)
-            .ok()
-            .flatten()
-            .map(|snapshot| snapshot.tags().iter().map(|tag| tag.name.clone()).collect())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
+    let source = library.image_source(&Wallhaven::new(None), image.path())?;
     let details = Details {
-        favorite,
+        favorite: marks.is_favorite(image.path()),
         wallpaper,
         source,
-        tags,
+        tags: marks.tags(image.path()).to_vec(),
+        // From the snapshot saved when the image was linked.
+        source_tags: marks.provider_tags(image.path()).to_vec(),
     };
     print!("{}", describe(image, &file, &details));
     Ok(())
@@ -272,8 +291,10 @@ struct Details {
     /// Whether the image is the wallpaper, if a desktop shell said.
     wallpaper: Option<bool>,
     source: Option<ImageSource>,
-    /// The provider's tags, from its snapshot.
+    /// The user's tags.
     tags: Vec<String>,
+    /// The provider's tags, from its snapshot.
+    source_tags: Vec<String>,
 }
 
 /// The lines `backdrop info` prints for `image`, whose absolute path is `file`.
@@ -309,6 +330,9 @@ fn describe(image: &ImageFile, file: &Path, details: &Details) -> String {
     }
     if !details.tags.is_empty() {
         lines.push(("tags", details.tags.join(", ")));
+    }
+    if !details.source_tags.is_empty() {
+        lines.push(("source tags", details.source_tags.join(", ")));
     }
     lines
         .into_iter()
@@ -367,6 +391,48 @@ fn set_favorite(paths: &AppPaths, images: &[PathBuf], favorite: bool) -> anyhow:
     Ok(())
 }
 
+/// Adds or removes tags of one image, then prints the tags it has. Scans
+/// first, so a new image can be tagged.
+fn change_tags(paths: &AppPaths, image: &Path, tags: &[String], add: bool) -> anyhow::Result<()> {
+    let (mut library, _) = scan(paths)?;
+    let indexed = library.images(ImageOrder::Path)?;
+    let path = find_image(&library, &indexed, image)?.path().to_path_buf();
+    let tags = if add {
+        library.add_tags(&path, tags)?
+    } else {
+        library.remove_tags(&path, tags)?
+    };
+    println!("{}", tags.join(", "));
+    Ok(())
+}
+
+/// One line per tag, most used first: how many images have it, then the tag
+/// and, for provider tags, where it comes from.
+fn print_tags(paths: &AppPaths) -> anyhow::Result<()> {
+    let (library, _) = scan(paths)?;
+    let mut out = io::stdout().lock();
+    for tag in library.tag_counts()? {
+        let origin = match (tag.user(), tag.provider()) {
+            (_, 0) => "",
+            (0, _) => "  (provider)",
+            _ => "  (yours and provider)",
+        };
+        let line = writeln!(
+            out,
+            "{:>6}  {}{origin}",
+            tag.user() + tag.provider(),
+            tag.name()
+        );
+        if let Err(error) = line {
+            return match error.kind() {
+                io::ErrorKind::BrokenPipe => Ok(()),
+                _ => Err(error.into()),
+            };
+        }
+    }
+    Ok(())
+}
+
 fn desktop() -> anyhow::Result<Box<dyn WallpaperBackend>> {
     match backdrop_core::desktop::detect() {
         Some(backend) => Ok(backend),
@@ -387,7 +453,7 @@ fn set_wallpaper(
     let path = match image {
         Some(image) => find_image(&library, &images, image)?.path().to_path_buf(),
         None => {
-            let favorites = library.favorites()?;
+            let marks = library.marks()?;
             let current = desktop
                 .current_wallpaper()
                 .ok()
@@ -395,7 +461,7 @@ fn set_wallpaper(
                 .and_then(|current| library.relative_path(&current).ok());
             let candidates: Vec<_> = images
                 .iter()
-                .filter(|image| filter.matches(image, &favorites))
+                .filter(|image| filter.matches(image, &marks))
                 .filter(|image| Some(image.path()) != current.as_deref())
                 .collect();
             if candidates.is_empty() {
@@ -678,11 +744,14 @@ mod tests {
 
         let details = Details {
             source: Some(ImageSource::Recorded("wallhaven/94x38z".to_owned())),
-            tags: vec!["mountains".to_owned(), "lake".to_owned()],
+            tags: vec!["mine".to_owned()],
+            source_tags: vec!["mountains".to_owned(), "lake".to_owned()],
             ..Details::default()
         };
         let text = describe(&images[0], &file, &details);
-        assert!(text.ends_with("source      wallhaven/94x38z\ntags        mountains, lake\n"));
+        assert!(text.ends_with(
+            "source      wallhaven/94x38z\ntags        mine\nsource tags mountains, lake\n"
+        ));
     }
 
     #[test]
@@ -724,6 +793,18 @@ mod tests {
     }
 
     #[test]
+    fn tags_take_an_image_and_at_least_one_tag() {
+        let args = Args::try_parse_from(["backdrop", "tag", "a.jpg", "night", "lake"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Tag { image, tags }) if image == Path::new("a.jpg") && tags == ["night", "lake"]
+        ));
+        assert!(Args::try_parse_from(["backdrop", "tag", "a.jpg"]).is_err());
+        assert!(Args::try_parse_from(["backdrop", "untag", "a.jpg"]).is_err());
+        assert!(Args::try_parse_from(["backdrop", "list", "--tag", "a", "--tag", "b"]).is_ok());
+    }
+
+    #[test]
     fn list_sorts_by_date_added_by_default() {
         let args = Args::try_parse_from(["backdrop", "list"]).unwrap();
         assert!(matches!(
@@ -731,7 +812,8 @@ mod tests {
             Some(Command::List {
                 sort: Sort::Added,
                 orientation: None,
-                favorites: false
+                favorites: false,
+                ..
             })
         ));
     }

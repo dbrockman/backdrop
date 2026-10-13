@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 mod download;
 mod sources;
+mod tags;
 
 use crate::download_rules::RulesError;
 use crate::image::ImageFile;
@@ -29,6 +30,7 @@ use crate::snapshot::SnapshotError;
 
 pub use download::Downloaded;
 pub use sources::ImageSource;
+pub use tags::TagCount;
 
 /// Removals above both limits in one scan need confirmation.
 const CONFIRM_REMOVALS_FROM_COUNT: usize = 20;
@@ -63,6 +65,8 @@ pub enum LibraryError {
     DifferentImage { path: PathBuf, source_name: String },
     #[error("{} is already linked to {source_name}", path.display())]
     AlreadyLinked { path: PathBuf, source_name: String },
+    #[error("\u{201c}{tag}\u{201d} can't be a tag: tags have 1 to {max} characters", max = metadata::MAX_TAG_LENGTH)]
+    InvalidTag { tag: String },
     #[error("{} already exists", path.display())]
     FileExists { path: PathBuf },
     #[error("the download of {wallpaper} is not a usable image: {message}")]
