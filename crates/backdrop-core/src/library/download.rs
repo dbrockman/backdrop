@@ -238,6 +238,14 @@ mod tests {
             Ok(bytes.len() as u64)
         }
 
+        fn download_thumbnail(
+            &self,
+            wallpaper: &RemoteWallpaper,
+            to: &mut dyn io::Write,
+        ) -> Result<u64, ProviderError> {
+            self.download(wallpaper, to, &mut |_, _| {})
+        }
+
         fn file_name(&self, id: &str, extension: &str) -> String {
             format!("fake-{id}.{extension}")
         }

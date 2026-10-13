@@ -12,6 +12,7 @@ const APPLICATION: &str = "backdrop";
 const DATABASE_FILE: &str = "library.sqlite3";
 const SETTINGS_FILE: &str = "settings.toml";
 const THUMBNAILS_DIR: &str = "thumbnails";
+const REMOTE_THUMBNAILS_DIR: &str = "remote-thumbnails";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PathsError {
@@ -74,6 +75,11 @@ impl AppPaths {
     pub fn thumbnails_dir(&self) -> PathBuf {
         self.cache_dir.join(THUMBNAILS_DIR)
     }
+
+    /// Thumbnails of provider wallpapers, downloaded while browsing.
+    pub fn remote_thumbnails_dir(&self) -> PathBuf {
+        self.cache_dir.join(REMOTE_THUMBNAILS_DIR)
+    }
 }
 
 #[cfg(test)]
@@ -87,5 +93,9 @@ mod tests {
         assert_eq!(paths.settings_file(), Path::new("/config/settings.toml"));
         assert_eq!(paths.database_file(), Path::new("/data/library.sqlite3"));
         assert_eq!(paths.thumbnails_dir(), Path::new("/cache/thumbnails"));
+        assert_eq!(
+            paths.remote_thumbnails_dir(),
+            Path::new("/cache/remote-thumbnails")
+        );
     }
 }

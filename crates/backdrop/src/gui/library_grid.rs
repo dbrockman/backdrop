@@ -31,6 +31,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::image_cache::LruImageCache;
+use super::tiles::{self, GAP, PADDING};
 use crate::format;
 
 pub const KEY_CONTEXT: &str = "LibraryGrid";
@@ -56,16 +57,6 @@ pub struct OpenImage;
 
 /// Decoded thumbnails kept in memory; well above the tiles visible at once.
 const DECODED_THUMBNAILS: usize = 300;
-
-/// Tile geometry, in rems so it follows the UI scale.
-const MIN_TILE_WIDTH: f32 = 13.;
-const GAP: f32 = 0.75;
-const PADDING: f32 = 1.;
-/// Tiles are 16:10, the most common wallpaper shape; others are cropped.
-const TILE_ASPECT: f32 = 10. / 16.;
-/// How far the selection ring sits outside the tile. Must stay below the gap
-/// and the padding so the ring is never clipped.
-const SELECTION_OFFSET: f32 = 0.25;
 
 enum Thumbnail {
     Ready(Arc<Path>),
@@ -252,12 +243,6 @@ impl LibraryGrid {
                 }
             }
         }));
-    }
-
-    fn columns_for_width(&self, window: &Window) -> usize {
-        let rem = window.rem_size();
-        let available = self.width - rem * (2. * PADDING) + rem * GAP;
-        ((available / (rem * (MIN_TILE_WIDTH + GAP))).floor() as usize).max(1)
     }
 
     fn set_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
@@ -539,10 +524,7 @@ impl LibraryGrid {
         let rem = window.rem_size();
         let columns = self.columns;
         let gap = rem * GAP;
-        let tile_width = ((self.width - rem * (2. * PADDING) - gap * (columns as f32 - 1.))
-            / columns as f32)
-            .max(px(1.));
-        let tile_height = tile_width * TILE_ASPECT;
+        let tile = tiles::tile_size(self.width, columns, rem);
         let images = self.images.clone();
         rows.map(|row| {
             let start = row * columns;
@@ -560,8 +542,8 @@ impl LibraryGrid {
                             self.render_tile(
                                 image,
                                 start + column,
-                                tile_width,
-                                tile_height,
+                                tile.width,
+                                tile.height,
                                 rem,
                                 cx,
                             )
@@ -629,20 +611,8 @@ impl LibraryGrid {
                         .child(Icon::new(IconName::StarFill).small()),
                 )
             })
-            // Labelled in words: the badge must not rely on color alone.
             .when(self.is_current_wallpaper(path), |picture| {
-                picture.child(
-                    div()
-                        .absolute()
-                        .top_1p5()
-                        .left_1p5()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_full()
-                        .bg(theme.background.opacity(0.85))
-                        .text_xs()
-                        .child("Current"),
-                )
+                picture.child(tiles::picture_badge("Current", cx))
             });
 
         div()
@@ -653,23 +623,7 @@ impl LibraryGrid {
             .w(width)
             .h(height)
             .child(picture)
-            // The selection ring sits outside the image, in the gap between
-            // tiles, so it never covers the picture. Its radius grows by the
-            // same offset so both corners stay concentric.
-            .when(selected, |tile| {
-                let offset = rem * SELECTION_OFFSET;
-                tile.child(
-                    div()
-                        .absolute()
-                        .top(-offset)
-                        .left(-offset)
-                        .right(-offset)
-                        .bottom(-offset)
-                        .rounded(theme.radius + offset)
-                        .border_2()
-                        .border_color(theme.primary),
-                )
-            })
+            .when(selected, |tile| tile.child(tiles::selection_ring(rem, cx)))
             .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
             .on_click(cx.listener(move |grid, event: &ClickEvent, window, cx| {
                 window.focus(&grid.focus_handle, cx);
@@ -686,7 +640,7 @@ impl EventEmitter<OpenImage> for LibraryGrid {}
 
 impl Render for LibraryGrid {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.columns = self.columns_for_width(window);
+        self.columns = tiles::columns(self.width, window.rem_size());
         let columns = self.columns;
         let rows = self.images.len().div_ceil(columns);
         let grid = cx.entity();

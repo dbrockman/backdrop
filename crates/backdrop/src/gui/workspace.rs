@@ -4,10 +4,12 @@ use std::sync::Arc;
 use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::library::{Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
+use backdrop_core::providers::Provider;
 use backdrop_core::settings::{LibraryStatus, Settings};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
@@ -16,11 +18,19 @@ use gpui_kit::*;
 
 use super::image_detail::{BackToGrid, ImageDetail};
 use super::library_grid::{LibraryGrid, OpenImage};
+use super::wallhaven_browser::{LibraryChanged, LibraryLocation, WallhavenBrowser};
 use crate::format::count;
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
-actions!(backdrop, [ChooseLibraryFolder]);
+actions!(backdrop, [ChooseLibraryFolder, ShowLibrary, ShowWallhaven]);
+
+/// What the window shows below its title bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Library,
+    Wallhaven,
+}
 
 /// The library as far as the window knows it.
 enum LibraryState {
@@ -55,6 +65,13 @@ pub struct Workspace {
     _detail_subscription: Option<Subscription>,
     /// The desktop shell, once detected; given to each new grid.
     desktop: Option<Arc<dyn WallpaperBackend>>,
+    page: Page,
+    /// Where Wallhaven wallpapers come from; a fake one in tests.
+    provider: Arc<dyn Provider>,
+    /// Created the first time the Wallhaven page is shown, so nothing is
+    /// requested from Wallhaven until then.
+    wallhaven: Option<Entity<WallhavenBrowser>>,
+    _wallhaven_subscription: Option<Subscription>,
     _activation_subscription: Subscription,
     focus_handle: FocusHandle,
 }
@@ -63,10 +80,12 @@ pub struct Workspace {
 pub type DetectDesktop = fn() -> Option<Box<dyn WallpaperBackend>>;
 
 impl Workspace {
-    /// `detect_desktop` finds the desktop shell; tests pass a fake one.
+    /// `detect_desktop` finds the desktop shell and `provider` serves Wallhaven
+    /// wallpapers; tests pass fakes.
     pub fn new(
         paths: AppPaths,
         detect_desktop: DetectDesktop,
+        provider: Arc<dyn Provider>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -125,6 +144,10 @@ impl Workspace {
             detail: None,
             _detail_subscription: None,
             desktop: None,
+            page: Page::Library,
+            provider,
+            wallhaven: None,
+            _wallhaven_subscription: None,
             _activation_subscription: activation,
             focus_handle,
         }
@@ -142,7 +165,93 @@ impl Workspace {
             self.scan_library(root.clone(), window, cx);
         }
         self.library = LibraryState::Loaded(status);
+        if let Some(browser) = &self.wallhaven {
+            let location = self.library_location();
+            browser.update(cx, |browser, cx| browser.set_library(location, cx));
+        }
         cx.notify();
+    }
+
+    /// Where Wallhaven downloads go, when a library folder is available.
+    fn library_location(&self) -> Option<LibraryLocation> {
+        match &self.library {
+            LibraryState::Loaded(LibraryStatus::Available(root)) => Some(LibraryLocation {
+                root: root.clone(),
+                database: self.paths.database_file(),
+            }),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    #[cfg(test)]
+    pub fn wallhaven(&self) -> Option<&Entity<WallhavenBrowser>> {
+        self.wallhaven.as_ref()
+    }
+
+    /// Shows `page` and moves focus into it. The Wallhaven page starts with its
+    /// search field focused the first time.
+    pub fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = page;
+        let focus_handle = match page {
+            Page::Library => self
+                .detail
+                .as_ref()
+                .map(|detail| detail.read(cx).focus_handle().clone())
+                .or_else(|| {
+                    self.grid
+                        .as_ref()
+                        .map(|grid| grid.read(cx).focus_handle().clone())
+                })
+                .unwrap_or_else(|| self.focus_handle.clone()),
+            Page::Wallhaven => match &self.wallhaven {
+                Some(browser) => browser.read(cx).focus_handle().clone(),
+                None => {
+                    let browser = self.open_wallhaven(window, cx);
+                    browser.update(cx, |browser, cx| browser.focus_search(window, cx));
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        window.focus(&focus_handle, cx);
+        cx.notify();
+    }
+
+    fn open_wallhaven(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<WallhavenBrowser> {
+        let provider = self.provider.clone();
+        let location = self.library_location();
+        let thumbnails_dir = self.paths.remote_thumbnails_dir();
+        let browser =
+            cx.new(|cx| WallhavenBrowser::new(provider, location, thumbnails_dir, window, cx));
+        self._wallhaven_subscription = Some(cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, _: &LibraryChanged, window, cx| this.library_changed(window, cx),
+        ));
+        self.wallhaven = Some(browser.clone());
+        browser
+    }
+
+    /// A download added an image: show it in the library. The download has
+    /// already indexed it, so the grid only needs to reread the index; a
+    /// library that was empty has no grid yet, so it is scanned instead.
+    fn library_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let LibraryState::Loaded(LibraryStatus::Available(root)) = &self.library else {
+            return;
+        };
+        match &self.grid {
+            Some(grid) => grid.update(cx, |grid, cx| grid.reload(cx)),
+            None => self.scan_library(root.clone(), window, cx),
+        }
     }
 
     /// Brings the index and metadata up to date with the library in the
@@ -179,6 +288,9 @@ impl Workspace {
                     Ok(scan) => Scan::Finished(Box::new(scan)),
                     Err(error) => Scan::Failed(error.to_string().into()),
                 };
+                if let Some(browser) = &this.wallhaven {
+                    browser.update(cx, |browser, cx| browser.refresh_library(cx));
+                }
                 cx.notify();
             })
             .ok();
@@ -452,6 +564,28 @@ impl Workspace {
         )
     }
 
+    /// The switch between the library and Wallhaven.
+    fn render_pages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = match self.page {
+            Page::Library => 0,
+            Page::Wallhaven => 1,
+        };
+        TabBar::new("pages")
+            .segmented()
+            .small()
+            .selected_index(selected)
+            .child(Tab::new().label("Library"))
+            .child(Tab::new().label("Wallhaven"))
+            .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                let page = if *ix == 0 {
+                    Page::Library
+                } else {
+                    Page::Wallhaven
+                };
+                this.show_page(page, window, cx)
+            }))
+    }
+
     fn render_library_summary(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let LibraryState::Loaded(LibraryStatus::Available(dir)) = &self.library else {
             return None;
@@ -505,40 +639,59 @@ fn empty_state(
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let library_page = self.page == Page::Library;
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &ChooseLibraryFolder, window, cx| {
                 this.choose_library_folder(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ShowLibrary, window, cx| {
+                this.show_page(Page::Library, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowWallhaven, window, cx| {
+                this.show_page(Page::Wallhaven, window, cx)
+            }))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
                 TitleBar::new()
-                    .child(
-                        self.render_detail_summary(cx)
-                            .or_else(|| {
+                    .child(h_flex().gap_3().child(self.render_pages(cx)).when(
+                        library_page,
+                        |row| {
+                            row.children(self.render_detail_summary(cx).or_else(|| {
                                 self.render_library_summary(cx)
                                     .map(IntoElement::into_any_element)
-                            })
-                            .unwrap_or_else(|| "Backdrop".into_any_element()),
-                    )
-                    .when(self.grid.is_some() && self.detail.is_none(), |bar| {
-                        bar.child(
-                            Button::new("change-library-folder")
-                                .ghost()
-                                .small()
-                                .mr_2()
-                                .label("Change Folder…")
-                                .loading(self.choosing)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.choose_library_folder(window, cx)
-                                })),
-                        )
+                            }))
+                        },
+                    ))
+                    .when(
+                        library_page && self.grid.is_some() && self.detail.is_none(),
+                        |bar| {
+                            bar.child(
+                                Button::new("change-library-folder")
+                                    .ghost()
+                                    .small()
+                                    .mr_2()
+                                    .label("Change Folder…")
+                                    .loading(self.choosing)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_library_folder(window, cx)
+                                    })),
+                            )
+                        },
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .map(|content| match (self.page, &self.wallhaven) {
+                        (Page::Wallhaven, Some(browser)) => content.child(browser.clone()),
+                        _ => content.child(self.render_library(cx)),
                     }),
             )
-            .child(v_flex().flex_1().min_h_0().child(self.render_library(cx)))
     }
 }
 
@@ -589,7 +742,15 @@ mod tests {
         let mut workspace = None;
         let window_paths = paths.clone();
         let handle = cx.open_window(size(px(800.), px(600.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(window_paths, || None, window, cx));
+            let view = cx.new(|cx| {
+                Workspace::new(
+                    window_paths,
+                    || None,
+                    std::sync::Arc::new(super::super::test_provider::FakeProvider::new(Vec::new())),
+                    window,
+                    cx,
+                )
+            });
             workspace = Some(view.clone());
             Root::new(view, window, cx)
         });
@@ -649,5 +810,27 @@ mod tests {
         cx.update_window(window, |_, window, cx| window.press("left", cx))
             .unwrap();
         assert_eq!(selected(cx), Some(1));
+    }
+    #[gpui_kit::test]
+    fn ctrl_2_shows_wallhaven_and_ctrl_1_returns_to_the_library(cx: &mut TestAppContext) {
+        let (_dir, _paths, window, workspace) = open_workspace(2, cx);
+        assert!(cx.update(|cx| workspace.read(cx).wallhaven().is_none()));
+
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        let page = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).page());
+        assert_eq!(page(cx), super::Page::Wallhaven);
+        assert!(cx.update(|cx| workspace.read(cx).wallhaven().is_some()));
+
+        // The search field has focus, and ctrl-1 still switches back.
+        cx.update_window(window, |_, window, cx| window.press("ctrl-1", cx))
+            .unwrap();
+        assert_eq!(page(cx), super::Page::Library);
+        // Focus is back in the grid, so arrow keys select images.
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().unwrap());
+        cx.update_window(window, |_, window, cx| window.press("right", cx))
+            .unwrap();
+        assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(0));
     }
 }

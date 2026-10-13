@@ -15,6 +15,7 @@ pub mod metadata;
 pub mod paths;
 pub mod providers;
 pub mod query;
+pub mod remote_thumbnails;
 pub mod settings;
 pub mod snapshot;
 pub mod thumbnails;

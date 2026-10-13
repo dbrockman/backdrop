@@ -3,9 +3,16 @@
 mod image_cache;
 mod image_detail;
 mod library_grid;
+#[cfg(test)]
+mod test_provider;
+mod tiles;
+mod wallhaven_browser;
 mod workspace;
 
+use std::sync::Arc;
+
 use backdrop_core::paths::AppPaths;
+use backdrop_core::providers::Wallhaven;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
@@ -14,7 +21,8 @@ use library_grid::{
     DeleteSelected, OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight,
     SelectUp, SetWallpaper, ToggleFavorite,
 };
-use workspace::{ChooseLibraryFolder, Workspace};
+use wallhaven_browser::{DownloadSelected, FocusSearch};
+use workspace::{ChooseLibraryFolder, ShowLibrary, ShowWallhaven, Workspace};
 
 const APP_ID: &str = "backdrop";
 const APP_NAME: &str = "Backdrop";
@@ -46,7 +54,11 @@ pub fn run(paths: AppPaths) {
                 ..TitleBar::window_options()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Workspace::new(paths, backdrop_core::desktop::detect, window, cx))
+                // Browsing shows safe-for-work wallpapers only, which need no API key.
+                let wallhaven = Arc::new(Wallhaven::new(None));
+                cx.new(|cx| {
+                    Workspace::new(paths, backdrop_core::desktop::detect, wallhaven, window, cx)
+                })
             })
             .expect("failed to open the main window");
             cx.activate(true);
@@ -56,9 +68,12 @@ pub fn run(paths: AppPaths) {
 fn bind_keys(cx: &mut App) {
     let grid = library_grid::KEY_CONTEXT;
     let detail = image_detail::KEY_CONTEXT;
+    let wallhaven = wallhaven_browser::KEY_CONTEXT;
     cx.bind_keys([
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-o", ChooseLibraryFolder, Some(workspace::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-1", ShowLibrary, Some(workspace::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-2", ShowWallhaven, Some(workspace::KEY_CONTEXT)),
         KeyBinding::new("left", SelectLeft, Some(grid)),
         KeyBinding::new("right", SelectRight, Some(grid)),
         KeyBinding::new("up", SelectUp, Some(grid)),
@@ -75,5 +90,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", PreviousImage, Some(detail)),
         KeyBinding::new("right", NextImage, Some(detail)),
         KeyBinding::new("f", ToggleFavorite, Some(detail)),
+        KeyBinding::new("left", SelectLeft, Some(wallhaven)),
+        KeyBinding::new("right", SelectRight, Some(wallhaven)),
+        KeyBinding::new("up", SelectUp, Some(wallhaven)),
+        KeyBinding::new("down", SelectDown, Some(wallhaven)),
+        KeyBinding::new("home", SelectFirst, Some(wallhaven)),
+        KeyBinding::new("end", SelectLast, Some(wallhaven)),
+        KeyBinding::new("d", DownloadSelected, Some(wallhaven)),
+        KeyBinding::new("ctrl-f", FocusSearch, Some(wallhaven)),
     ]);
 }

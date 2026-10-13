@@ -706,7 +706,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Recognize Wallhaven filenames
 - [x] Snapshot provider metadata into the library
 - [ ] Display provider tags
-- [ ] Search and browse Wallhaven
+- [x] Search and browse Wallhaven
 - [ ] API-key configuration
 - [ ] SFW/NSFW filtering
 - [x] Download original images

@@ -327,6 +327,14 @@ pub trait Provider: Send + Sync {
     /// extension of its format, such as `jpg`.
     fn file_name(&self, id: &str, extension: &str) -> String;
 
+    /// Writes the wallpaper's thumbnail ([`RemoteWallpaper::thumbnail_url`]) to
+    /// `to`. Returns the number of bytes written.
+    fn download_thumbnail(
+        &self,
+        wallpaper: &RemoteWallpaper,
+        to: &mut dyn Write,
+    ) -> Result<u64, ProviderError>;
+
     /// The wallpaper id in a file name following the provider's naming
     /// convention, such as `wallhaven-94x38z.jpg`.
     fn id_from_file_name(&self, file_name: &str) -> Option<String>;
@@ -342,11 +350,11 @@ impl fmt::Debug for dyn Provider {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl RemoteWallpaper {
-    /// A wallpaper of `provider` with id `id`, without tags, as in search
-    /// results.
-    pub(crate) fn for_test(provider: &'static str, id: &str) -> Self {
+    /// A 20 × 10 safe-for-work wallpaper of `provider` with id `id`, without
+    /// tags, as in search results.
+    pub fn for_test(provider: &'static str, id: &str) -> Self {
         Self {
             provider,
             id: id.to_owned(),

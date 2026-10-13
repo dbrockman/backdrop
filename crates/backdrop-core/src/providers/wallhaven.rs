@@ -126,6 +126,51 @@ impl Wallhaven {
         }
     }
 
+    /// Writes the file at `url`, an image of wallpaper `id`, to `to`.
+    fn fetch_file(
+        &self,
+        url: &str,
+        id: &str,
+        to: &mut dyn Write,
+        progress: Progress,
+    ) -> Result<u64, ProviderError> {
+        // Image servers don't need the API key, so it isn't sent to them.
+        let mut response = self.agent.get(url).call().map_err(network_error)?;
+        match response.status().as_u16() {
+            200..=299 => {}
+            404 => {
+                return Err(ProviderError::NotFound {
+                    provider: NAME,
+                    id: id.to_owned(),
+                });
+            }
+            status => {
+                return Err(ProviderError::Status {
+                    provider: NAME,
+                    status,
+                });
+            }
+        }
+        let total = response.body().content_length();
+        let mut reader = response.body_mut().as_reader();
+        let mut buffer = vec![0; 64 * 1024];
+        let mut received = 0;
+        progress(received, total);
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| network_error(ureq::Error::Io(error)))?;
+            if read == 0 {
+                break;
+            }
+            to.write_all(&buffer[..read])
+                .map_err(ProviderError::Write)?;
+            received += read as u64;
+            progress(received, total);
+        }
+        Ok(received)
+    }
+
     fn get_json<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -205,45 +250,15 @@ impl Provider for Wallhaven {
         to: &mut dyn Write,
         progress: Progress,
     ) -> Result<u64, ProviderError> {
-        // Image servers don't need the API key, so it isn't sent to them.
-        let mut response = self
-            .agent
-            .get(&wallpaper.image_url)
-            .call()
-            .map_err(network_error)?;
-        match response.status().as_u16() {
-            200..=299 => {}
-            404 => {
-                return Err(ProviderError::NotFound {
-                    provider: NAME,
-                    id: wallpaper.id.clone(),
-                });
-            }
-            status => {
-                return Err(ProviderError::Status {
-                    provider: NAME,
-                    status,
-                });
-            }
-        }
-        let total = response.body().content_length();
-        let mut reader = response.body_mut().as_reader();
-        let mut buffer = vec![0; 64 * 1024];
-        let mut received = 0;
-        progress(received, total);
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| network_error(ureq::Error::Io(error)))?;
-            if read == 0 {
-                break;
-            }
-            to.write_all(&buffer[..read])
-                .map_err(ProviderError::Write)?;
-            received += read as u64;
-            progress(received, total);
-        }
-        Ok(received)
+        self.fetch_file(&wallpaper.image_url, &wallpaper.id, to, progress)
+    }
+
+    fn download_thumbnail(
+        &self,
+        wallpaper: &RemoteWallpaper,
+        to: &mut dyn Write,
+    ) -> Result<u64, ProviderError> {
+        self.fetch_file(&wallpaper.thumbnail_url, &wallpaper.id, to, &mut |_, _| {})
     }
 
     fn file_name(&self, id: &str, extension: &str) -> String {

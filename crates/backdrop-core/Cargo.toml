@@ -21,3 +21,7 @@ toml.workspace = true
 trash.workspace = true
 ureq.workspace = true
 walkdir.workspace = true
+
+[features]
+# Test helpers for crates that build on this one.
+test-support = []
