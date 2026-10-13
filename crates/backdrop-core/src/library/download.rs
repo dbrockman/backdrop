@@ -9,12 +9,13 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufWriter, Write as _};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::{Library, LibraryError};
-use crate::discovery;
+use crate::download_rules::DownloadRules;
 use crate::providers::{Progress, Provider, RemoteWallpaper};
 use crate::snapshot::Snapshot;
+use crate::{discovery, fs_util};
 
 /// The outcome of [`Library::download`]. Paths are relative to the library
 /// root.
@@ -52,22 +53,27 @@ impl Library {
         Ok(named.min())
     }
 
-    /// Downloads the original of `wallpaper` into `folder`, a folder in the
-    /// library given relative to its root (empty for the root itself), unless
-    /// the library already has it. The library should have been scanned
+    /// Downloads the original of `wallpaper` unless the library already has
+    /// it. It is saved in `folder`, a folder in the library given relative to
+    /// its root (empty for the root itself), or with `None`, in the folder the
+    /// library's download rules choose. The library should have been scanned
     /// first, so an existing copy is found.
     pub fn download(
         &mut self,
         provider: &dyn Provider,
         wallpaper: &RemoteWallpaper,
-        folder: &Path,
+        folder: Option<&Path>,
         progress: Progress,
     ) -> Result<Downloaded, LibraryError> {
         if let Some(path) = self.find_source(provider, wallpaper.id())? {
             return Ok(Downloaded::AlreadyInLibrary(path));
         }
-        let dir = self.download_folder(folder)?;
-        // Search results leave out the tags, which the snapshot should keep.
+        // Read before anything is fetched, so a broken rules file fails fast.
+        let rules = match folder {
+            Some(_) => None,
+            None => Some(DownloadRules::load(&self.root)?),
+        };
+        // Search results leave out the tags, which rules and the snapshot need.
         let details;
         let wallpaper = match wallpaper.tags() {
             Some(_) => wallpaper,
@@ -76,6 +82,11 @@ impl Library {
                 &details
             }
         };
+        let folder = folder
+            .map(Path::to_path_buf)
+            .or_else(|| rules.map(|rules| rules.destination(wallpaper).folder))
+            .unwrap_or_default();
+        let dir = self.download_folder(&folder)?;
         let fetched = chrono::Utc::now();
 
         let write_error = |cause: io::Error| LibraryError::Download {
@@ -128,11 +139,7 @@ impl Library {
         let invalid = || LibraryError::InvalidDownloadFolder {
             path: folder.to_path_buf(),
         };
-        let plain = folder.components().all(|component| match component {
-            Component::Normal(name) => !name.as_encoded_bytes().starts_with(b"."),
-            _ => false,
-        });
-        if !plain {
+        if !fs_util::is_plain_folder(folder) {
             return Err(invalid());
         }
         let dir = self.root.join(folder);
@@ -275,8 +282,12 @@ mod tests {
             folder: &str,
         ) -> Result<Downloaded, LibraryError> {
             let wallpaper = RemoteWallpaper::for_test("fake", id);
-            self.library
-                .download(provider, &wallpaper, Path::new(folder), &mut |_, _| {})
+            self.library.download(
+                provider,
+                &wallpaper,
+                Some(Path::new(folder)),
+                &mut |_, _| {},
+            )
         }
 
         /// Every file under the library root, hidden ones included.
@@ -353,6 +364,70 @@ mod tests {
             Downloaded::Saved(PathBuf::from("dark/new/fake-abc123.png"))
         );
         assert!(fixture.root().join("dark/new/fake-abc123.png").is_file());
+    }
+
+    fn write_rules(fixture: &Fixture, text: &str) {
+        let file = DownloadRules::file(fixture.root());
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    }
+
+    #[test]
+    fn without_a_folder_the_rules_choose_one() {
+        let mut fixture = Fixture::new();
+        // The fake provider tags every wallpaper "mountains" in its details,
+        // which search results lack.
+        write_rules(
+            &fixture,
+            "version = 1\ndefault = \"new\"\n\n[[rules]]\nfolder = \"nature\"\ntags = \"mountains\"\n",
+        );
+        let provider = FakeProvider::with(&[("abc123", png(20, 10, 1))]);
+        let wallpaper = RemoteWallpaper::for_test("fake", "abc123");
+
+        let downloaded = fixture
+            .library
+            .download(&provider, &wallpaper, None, &mut |_, _| {})
+            .unwrap();
+
+        assert_eq!(
+            downloaded,
+            Downloaded::Saved(PathBuf::from("nature/fake-abc123.png"))
+        );
+    }
+
+    #[test]
+    fn without_rules_or_a_folder_downloads_go_to_the_library_folder() {
+        let mut fixture = Fixture::new();
+        let provider = FakeProvider::with(&[("abc123", png(20, 10, 1))]);
+        let wallpaper = RemoteWallpaper::for_test("fake", "abc123");
+
+        let downloaded = fixture
+            .library
+            .download(&provider, &wallpaper, None, &mut |_, _| {})
+            .unwrap();
+
+        assert_eq!(
+            downloaded,
+            Downloaded::Saved(PathBuf::from("fake-abc123.png"))
+        );
+    }
+
+    #[test]
+    fn a_broken_rules_file_stops_the_download_before_it_starts() {
+        let mut fixture = Fixture::new();
+        write_rules(
+            &fixture,
+            "version = 1\n[[rules]]\nfolder = \"a\"\nratings = \"nsfw\"\n",
+        );
+        let provider = FakeProvider::with(&[("abc123", png(20, 10, 1))]);
+        let wallpaper = RemoteWallpaper::for_test("fake", "abc123");
+
+        let result = fixture
+            .library
+            .download(&provider, &wallpaper, None, &mut |_, _| {});
+
+        assert!(matches!(result, Err(LibraryError::Rules(_))));
+        assert_eq!(*provider.detail_requests.lock().unwrap(), 0);
     }
 
     #[test]

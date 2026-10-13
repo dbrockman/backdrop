@@ -30,8 +30,9 @@ pub enum WallhavenCommand {
         /// Wallpaper ids, links to them, or file names like wallhaven-94x38z.jpg.
         #[arg(required = true)]
         wallpapers: Vec<String>,
-        /// The library folder to save into, such as `dark`; the library
-        /// folder itself by default. Missing folders are created.
+        /// The library folder to save into, such as `dark`, instead of the one
+        /// the download rules choose (see `backdrop rules`). Missing folders
+        /// are created.
         #[arg(long, value_name = "FOLDER")]
         to: Option<PathBuf>,
     },
@@ -292,16 +293,16 @@ fn download(paths: &AppPaths, wallpapers: &[String], to: Option<&Path>) -> anyho
     // Scanned first, so wallpapers already in the library are found.
     let (mut library, _) = super::scan(paths)?;
     let folder = match to {
-        None => PathBuf::new(),
+        None => None,
         Some(folder) if folder.is_absolute() => match folder.strip_prefix(library.root()) {
-            Ok(relative) => relative.to_path_buf(),
+            Ok(relative) => Some(relative.to_path_buf()),
             Err(_) => bail!(
                 "{} is not inside the library folder {}",
                 folder.display(),
                 library.root().display()
             ),
         },
-        Some(folder) => folder.to_path_buf(),
+        Some(folder) => Some(folder.to_path_buf()),
     };
 
     let mut failed = 0;
@@ -312,7 +313,8 @@ fn download(paths: &AppPaths, wallpapers: &[String], to: Option<&Path>) -> anyho
             }
             let wallpaper = wallhaven.wallpaper(id).map_err(explain)?;
             let mut progress = progress_line(id);
-            let downloaded = library.download(&wallhaven, &wallpaper, &folder, &mut progress);
+            let downloaded =
+                library.download(&wallhaven, &wallpaper, folder.as_deref(), &mut progress);
             progress_done();
             Ok(downloaded?)
         })();

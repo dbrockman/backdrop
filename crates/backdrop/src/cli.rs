@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::bail;
 use backdrop_core::desktop::WallpaperBackend;
+use backdrop_core::download_rules::{DownloadRule, DownloadRules};
 use backdrop_core::image::{ImageFile, Orientation};
 use backdrop_core::library::{Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
@@ -89,6 +90,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<LibraryCommand>,
     },
+    /// Print the download rules, which choose the folder each download goes to.
+    Rules,
     /// Search and describe wallpapers on Wallhaven.
     Wallhaven {
         #[command(subcommand)]
@@ -195,6 +198,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
             print_paths(&paths);
             Ok(())
         }
+        Command::Rules => print_rules(&paths.settings_file()),
         Command::Wallhaven { command } => wallhaven::run(&paths, command),
     }
 }
@@ -439,6 +443,93 @@ fn set_library(settings_file: &Path, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Prints the rules in the order they are tried, and the default folder.
+fn print_rules(settings_file: &Path) -> anyhow::Result<()> {
+    let root = library_root(settings_file)?;
+    let file = DownloadRules::file(&root);
+    let rules = DownloadRules::load(&root)?;
+    if rules.rules().is_empty() && rules.default_folder().as_os_str().is_empty() {
+        println!(
+            "No download rules: downloads go to the library folder. Add rules to {}.",
+            file.display()
+        );
+        return Ok(());
+    }
+    print!("{}", describe_rules(&rules));
+    Ok(())
+}
+
+/// One line per rule, then the default: the folder, then what goes there.
+fn describe_rules(rules: &DownloadRules) -> String {
+    let folder = |folder: &Path| match folder.as_os_str().is_empty() {
+        true => "(library folder)".to_owned(),
+        false => format!("{}/", folder.display()),
+    };
+    let mut lines: Vec<_> = rules
+        .rules()
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| {
+            (
+                format!("{}.", index + 1),
+                folder(rule.folder()),
+                describe_rule(rule),
+            )
+        })
+        .collect();
+    lines.push((
+        String::new(),
+        folder(rules.default_folder()),
+        "everything else".to_owned(),
+    ));
+    let width = lines
+        .iter()
+        .map(|(_, folder, _)| folder.len())
+        .max()
+        .unwrap_or(0);
+    lines
+        .into_iter()
+        .map(|(number, folder, criteria)| format!("{number:<4}{folder:<width$}  {criteria}\n"))
+        .collect()
+}
+
+/// What a rule matches, e.g. "rating sketchy or nsfw, orientation portrait".
+fn describe_rule(rule: &DownloadRule) -> String {
+    let either = |values: Vec<String>| values.join(" or ");
+    let mut criteria = Vec::new();
+    if !rule.providers().is_empty() {
+        criteria.push(format!("provider {}", either(rule.providers().to_vec())));
+    }
+    if !rule.ratings().is_empty() {
+        let ratings = rule
+            .ratings()
+            .iter()
+            .map(|rating| rating.as_str().to_owned());
+        criteria.push(format!("rating {}", either(ratings.collect())));
+    }
+    if !rule.orientations().is_empty() {
+        let orientations = rule
+            .orientations()
+            .iter()
+            .map(|orientation| orientation_name(*orientation).to_owned());
+        criteria.push(format!("orientation {}", either(orientations.collect())));
+    }
+    if !rule.categories().is_empty() {
+        criteria.push(format!("category {}", either(rule.categories().to_vec())));
+    }
+    if !rule.tags().is_empty() {
+        criteria.push(format!("tagged {}", either(rule.tags().to_vec())));
+    }
+    if let Some((width, height)) = rule.at_least() {
+        criteria.push(format!("at least {width}x{height}"));
+    }
+    if criteria.is_empty() {
+        "everything".to_owned()
+    } else {
+        criteria.join(", ")
+    }
+}
+
 fn print_paths(paths: &AppPaths) {
     println!("settings    {}", paths.settings_file().display());
     println!("database    {}", paths.database_file().display());
@@ -532,6 +623,44 @@ mod tests {
         let text = describe(&images[0], &file, false, Some(false));
         assert!(text.contains("favorite    no\n"));
         assert!(text.ends_with("wallpaper   no\n"));
+    }
+
+    #[test]
+    fn rules_are_described_in_order() {
+        let library = tempfile::tempdir().unwrap();
+        let file = DownloadRules::file(library.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            r#"
+            version = 1
+            default = "new"
+
+            [[rules]]
+            folder = "nsfw"
+            rating = ["sketchy", "nsfw"]
+
+            [[rules]]
+            folder = "nature/big"
+            orientation = "landscape"
+            tags = ["mountains", "lakes"]
+            at_least = "3840x2160"
+
+            [[rules]]
+            folder = "inbox"
+            "#,
+        )
+        .unwrap();
+
+        let rules = DownloadRules::load(library.path()).unwrap();
+
+        assert_eq!(
+            describe_rules(&rules),
+            "1.  nsfw/        rating sketchy or nsfw\n\
+             2.  nature/big/  orientation landscape, tagged mountains or lakes, at least 3840x2160\n\
+             3.  inbox/       everything\n\
+             \x20   new/         everything else\n"
+        );
     }
 
     #[test]

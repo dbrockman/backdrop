@@ -6,6 +6,7 @@
 
 pub mod desktop;
 pub mod discovery;
+pub mod download_rules;
 mod fs_util;
 pub mod image;
 pub mod index;

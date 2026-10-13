@@ -13,6 +13,7 @@ mod test_server;
 use std::fmt;
 use std::io::{self, Write};
 
+use serde::{Deserialize, Serialize};
 use toml::value::Datetime;
 
 use crate::image::Orientation;
@@ -51,7 +52,8 @@ pub enum ProviderError {
 }
 
 /// How explicit a wallpaper is, in the provider's own rating.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ContentRating {
     /// Safe for work.
     Sfw,

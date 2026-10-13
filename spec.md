@@ -267,11 +267,13 @@ Rules may use properties such as:
 
 Initial implementation can use a small set of built-in criteria rather than a general-purpose rule language.
 
-Settings should define a default download directory and optionally a set of ordered rules.
+The library defines a default download directory and optionally a set of ordered rules. They describe the library's folder structure, so they are stored with it, in `.backdrop/downloads.toml` (§5.2), not in XDG settings.
 
 Each matching download rule should resolve to a directory within the configured library root.
 
 **Decided:** rules are ordered and the first matching rule wins. Rules do not combine; a nested destination such as `nsfw/dark/` is written as one rule whose criteria match both.
+
+The initial criteria are provider, content rating, orientation, provider category, tags, and minimum resolution; light/dark classification follows with Phase 4. Within a rule every criterion must match, and a criterion with several values matches any of them. A rule without criteria matches everything. A wallpaper no rule matches goes to the default directory, or the library root if none is set. Choosing a folder for one download (`--to`) overrides the rules.
 
 ---
 
@@ -353,14 +355,13 @@ Data is placed by one rule: **can Backdrop regenerate it offline, from the libra
 | Content hash of each image with metadata | Library (`.backdrop/metadata.toml`) |
 | Provider association (provider and ID) | Library (`.backdrop/metadata.toml`) |
 | Provider metadata snapshot (tags, URL, publication date, content rating, …) | Library (`.backdrop/sources/`) |
+| Download rules and default download directory | Library (`.backdrop/downloads.toml`) |
 | Paths, dimensions, file size, modification time, format | SQLite index |
 | Hash cache, tag and search indexes, indexing state | SQLite index |
 | Thumbnails | XDG cache directory |
 | API keys, appearance, desktop backend, window state | XDG config directory |
 
 Provider metadata is stored as text, not just cached, because a wallpaper can be deleted from the provider. Re-fetching cannot be relied on.
-
-**Open decision:** download rules (§3.6) describe the library's folder structure and may belong in `.backdrop/` rather than in XDG settings.
 
 ### 5.2 Library metadata files
 
@@ -371,6 +372,7 @@ Wallpapers/
   dark/
     another-wallpaper.jpg
   .backdrop/
+    downloads.toml
     metadata.toml
     sources/
       wallhaven/
@@ -395,6 +397,22 @@ source = "wallhaven/94x38z"
 
 - Snapshots store normalized fields plus the time they were fetched, not raw API responses. Fields should be mapped generously, because unmapped fields are lost.
 - Refreshing a snapshot only happens on explicit request. If the provider no longer has the item, the snapshot is kept and marked as removed upstream, with the date.
+
+**`downloads.toml`** holds the download rules (§3.6): a format version, an optional `default` folder, and ordered `[[rules]]`, each with a `folder` and its criteria. Backdrop reads it but doesn't write it yet; it is edited by hand, so an unknown key or value is an error rather than a criterion silently ignored.
+
+```toml
+version = 1
+default = "new"
+
+[[rules]]
+folder = "nsfw"
+rating = ["sketchy", "nsfw"]
+
+[[rules]]
+folder = "nature/big"
+tags = ["mountains", "forest"]
+at_least = "3840x2160"
+```
 
 Writing rules:
 
@@ -530,8 +548,7 @@ Settings should be organized into logical sections.
 
 ### Downloads
 
-- Default download directory
-- Download subdirectory rules
+- Default download directory and subdirectory rules (stored in the library, §3.6)
 - Duplicate download behavior
 - Filename conventions
 
@@ -614,7 +631,7 @@ backdrop library [set <dir>]
 backdrop paths
 ```
 
-Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>`, `backdrop wallhaven download <id|link|file>… [--to <folder>]` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide filtering and metadata editing.
+Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>`, `backdrop wallhaven download <id|link|file>… [--to <folder>]`, `backdrop rules` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide filtering and metadata editing.
 
 CLI operations should use the same settings, database, and core logic as the GUI.
 
@@ -692,7 +709,7 @@ The goal is a useful offline wallpaper browser.
 - [ ] SFW/NSFW filtering
 - [x] Download original images
 - [ ] Detect already-downloaded images
-- [ ] Download destination rules
+- [x] Download destination rules
 
 ### Phase 3 — Organization and Git
 
@@ -725,7 +742,6 @@ These questions can be resolved during implementation.
 
 | Topic | Question |
 |---|---|
-| Download rules location | Should download rules be stored in the library (`.backdrop/`) or in XDG settings? |
 | Downloaded indicators | Highlight, dim, hide, or provide a toggle? |
 | Content ratings | Should filtering apply to local images as well as online browsing? |
 | Multi-monitor | How should images be highlighted if different monitors use different wallpapers? |

@@ -26,3 +26,13 @@ pub(crate) fn hash_file(path: &Path) -> io::Result<String> {
     hasher.update_reader(fs::File::open(path)?)?;
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
+
+/// Whether `path` names a folder inside the library by plain, non-hidden
+/// names: no root, `..`, or `.` components, and nothing scans would skip. An
+/// empty path is the library folder itself.
+pub(crate) fn is_plain_folder(path: &Path) -> bool {
+    path.components().all(|component| match component {
+        std::path::Component::Normal(name) => !name.as_encoded_bytes().starts_with(b"."),
+        _ => false,
+    })
+}

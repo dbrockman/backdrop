@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 mod download;
 
+use crate::download_rules::RulesError;
 use crate::image::ImageFile;
 use crate::index::{Index, IndexError, ScanSummary};
 use crate::metadata::{self, ImageMetadata, LibraryMetadata, MetadataError};
@@ -52,6 +53,8 @@ pub enum LibraryError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Snapshot(#[from] SnapshotError),
+    #[error(transparent)]
+    Rules(#[from] RulesError),
     #[error("{} can't hold downloads: use a folder inside the library that isn't hidden or a link", path.display())]
     InvalidDownloadFolder { path: PathBuf },
     #[error("{} already exists", path.display())]
