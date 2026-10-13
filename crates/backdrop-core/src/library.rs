@@ -32,6 +32,13 @@ pub enum LibraryError {
     Metadata(MetadataError),
     #[error("{} is not an image in the library", path.display())]
     NotInLibrary { path: PathBuf },
+    #[error("{} is not inside the library folder {}", path.display(), root.display())]
+    OutsideLibrary { path: PathBuf, root: PathBuf },
+    #[error("could not find {}: {cause}", path.display())]
+    NotFound {
+        path: PathBuf,
+        cause: std::io::Error,
+    },
 }
 
 impl From<IndexError> for LibraryError {
@@ -127,6 +134,38 @@ impl Library {
 
     pub fn metadata(&self) -> Result<LibraryMetadata, LibraryError> {
         Ok(LibraryMetadata::load(&self.root)?)
+    }
+
+    /// Paths of the images marked as favorites.
+    pub fn favorites(&self) -> Result<HashSet<PathBuf>, LibraryError> {
+        Ok(self
+            .metadata()?
+            .records()
+            .filter(|(_, record)| record.is_favorite())
+            .map(|(path, _)| path)
+            .collect())
+    }
+
+    pub fn set_favorite(&mut self, path: &Path, favorite: bool) -> Result<(), LibraryError> {
+        self.update_image(path, |record| record.set_favorite(favorite))
+    }
+
+    /// Turns a path given by the user, absolute or relative to the working
+    /// directory, into a path relative to the library root.
+    pub fn relative_path(&self, path: &Path) -> Result<PathBuf, LibraryError> {
+        let absolute = fs::canonicalize(path).map_err(|cause| LibraryError::NotFound {
+            path: path.to_path_buf(),
+            cause,
+        })?;
+        absolute
+            .strip_prefix(&self.root)
+            .ok()
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| LibraryError::OutsideLibrary {
+                path: path.to_path_buf(),
+                root: self.root.clone(),
+            })
     }
 
     /// Changes the metadata of the indexed image at `path`, creating its record
@@ -359,9 +398,7 @@ mod tests {
         }
 
         fn favorite(&mut self, path: &str) {
-            self.library
-                .update_image(Path::new(path), |record| record.set_favorite(true))
-                .unwrap();
+            self.library.set_favorite(Path::new(path), true).unwrap();
         }
 
         fn scan(&mut self) -> Reconciliation {
@@ -593,5 +630,53 @@ mod tests {
 
         assert_eq!(reconciliation, Reconciliation::default());
         assert_eq!(fixture.favorites(), ["a.png"]);
+    }
+
+    #[test]
+    fn favorites_are_listed_and_can_be_cleared() {
+        let mut fixture = Fixture::new();
+        fixture.write("a.png", &png(10, 10, 1));
+        fixture.write("b.png", &png(10, 10, 2));
+        fixture.scan();
+        fixture.favorite("a.png");
+        fixture.favorite("b.png");
+
+        fixture
+            .library
+            .set_favorite(Path::new("a.png"), false)
+            .unwrap();
+
+        assert_eq!(
+            fixture.library.favorites().unwrap(),
+            HashSet::from([PathBuf::from("b.png")])
+        );
+    }
+
+    #[test]
+    fn user_paths_resolve_to_library_paths() {
+        let fixture = Fixture::new();
+        fixture.write("dark/a.png", &png(10, 10, 1));
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("b.png"), png(10, 10, 2)).unwrap();
+        let library = &fixture.library;
+
+        assert_eq!(
+            library
+                .relative_path(&fixture.root().join("dark/../dark/a.png"))
+                .unwrap(),
+            Path::new("dark/a.png")
+        );
+        assert!(matches!(
+            library.relative_path(&outside.path().join("b.png")),
+            Err(LibraryError::OutsideLibrary { .. })
+        ));
+        assert!(matches!(
+            library.relative_path(fixture.root()),
+            Err(LibraryError::OutsideLibrary { .. })
+        ));
+        assert!(matches!(
+            library.relative_path(&fixture.root().join("missing.png")),
+            Err(LibraryError::NotFound { .. })
+        ));
     }
 }

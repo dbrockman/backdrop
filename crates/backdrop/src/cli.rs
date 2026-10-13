@@ -28,6 +28,19 @@ pub enum Command {
         /// Order of the images.
         #[arg(long, value_enum, default_value_t = Sort::Added)]
         sort: Sort,
+        /// Only list favorites.
+        #[arg(long)]
+        favorites: bool,
+    },
+    /// Mark images as favorites.
+    Favorite {
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
+    },
+    /// Remove images from favorites.
+    Unfavorite {
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
     },
     /// Update the index and metadata with new, changed, moved, and removed images.
     Scan {
@@ -77,7 +90,9 @@ pub fn run(command: Command) -> anyhow::Result<()> {
     let paths = AppPaths::from_env()?;
     match command {
         Command::Gui => unreachable!("the GUI is started by main"),
-        Command::List { sort } => list(&paths, sort.into()),
+        Command::List { sort, favorites } => list(&paths, sort.into(), favorites),
+        Command::Favorite { images } => set_favorite(&paths, &images, true),
+        Command::Unfavorite { images } => set_favorite(&paths, &images, false),
         Command::Scan { remove_missing } => scan_command(&paths, remove_missing),
         Command::Library { command: None } => print_library(&paths.settings_file()),
         Command::Library {
@@ -92,10 +107,35 @@ pub fn run(command: Command) -> anyhow::Result<()> {
 
 /// Scans first, so the list is never stale. Scanning an unchanged library only
 /// checks file sizes and modification times.
-fn list(paths: &AppPaths, order: ImageOrder) -> anyhow::Result<()> {
+fn list(paths: &AppPaths, order: ImageOrder, favorites_only: bool) -> anyhow::Result<()> {
     let (library, _) = scan(paths)?;
+    let favorites = if favorites_only {
+        Some(library.favorites()?)
+    } else {
+        None
+    };
     for image in library.images(order)? {
+        if favorites
+            .as_ref()
+            .is_some_and(|favorites| !favorites.contains(image.path()))
+        {
+            continue;
+        }
         println!("{}", library.root().join(image.path()).display());
+    }
+    Ok(())
+}
+
+/// Scans first, so an image added since the last scan can be marked. All
+/// paths are checked before any is changed.
+fn set_favorite(paths: &AppPaths, images: &[PathBuf], favorite: bool) -> anyhow::Result<()> {
+    let (mut library, _) = scan(paths)?;
+    let images = images
+        .iter()
+        .map(|image| library.relative_path(image))
+        .collect::<Result<Vec<_>, _>>()?;
+    for image in images {
+        library.set_favorite(&image, favorite)?;
     }
     Ok(())
 }
@@ -212,7 +252,10 @@ mod tests {
         let args = Args::try_parse_from(["backdrop", "list"]).unwrap();
         assert!(matches!(
             args.command,
-            Some(Command::List { sort: Sort::Added })
+            Some(Command::List {
+                sort: Sort::Added,
+                favorites: false
+            })
         ));
     }
 }
