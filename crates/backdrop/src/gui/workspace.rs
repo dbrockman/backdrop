@@ -1200,4 +1200,43 @@ mod tests {
         assert!(saved(&second).is_empty());
         assert_eq!(saved(&first), ["Night fog"]);
     }
+    #[gpui_kit::test]
+    fn the_detail_view_deletes_only_the_image_it_shows(cx: &mut TestAppContext) {
+        let (_dir, _paths, window, workspace) = open_workspace(3, cx);
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().expect("grid after scan"));
+        let root = cx.update(|cx| grid.read(cx).root().to_path_buf());
+        let path = |ix: usize, cx: &mut TestAppContext| {
+            cx.update(|cx| grid.read(cx).images()[ix].path().to_path_buf())
+        };
+        let (first, second) = (path(0, cx), path(1, cx));
+        let first_id: SharedString = first.to_string_lossy().into_owned().into();
+
+        // Two images selected, the second current; Enter shows it.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click(first_id.clone(), cx);
+            window.press("shift-right", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| grid.read(cx).selection_count()), 2);
+        assert!(cx.update(|cx| workspace.read(cx).detail.is_some()));
+        cx.update_window(window, |_, window, cx| window.press("delete", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert!(!root.join(&second).exists());
+        assert!(
+            root.join(&first).exists(),
+            "only the shown image is deleted"
+        );
+    }
 }

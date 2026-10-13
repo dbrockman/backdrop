@@ -5,7 +5,7 @@
 //! the background in display order; a tile shows a placeholder until its
 //! thumbnail is ready.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,7 +53,12 @@ actions!(
         DeleteSelected,
         ToggleFavorite,
         FocusTagFilter,
-        LeaveTagFilter
+        Dismiss,
+        ExtendLeft,
+        ExtendRight,
+        ExtendUp,
+        ExtendDown,
+        SelectAll
     ]
 );
 
@@ -86,8 +91,14 @@ pub struct LibraryGrid {
     marks: ImageMarks,
     /// Keyed by image path; images without an entry are still being prepared.
     thumbnails: HashMap<PathBuf, Thumbnail>,
-    /// The selected image, by path so it survives reordering.
+    /// The current image, by path so it survives reordering: where keyboard
+    /// movement starts, and what Enter opens.
     selected: Option<PathBuf>,
+    /// Every selected image. Plain navigation selects just the current image;
+    /// ctrl-click, shift-click, shift with the arrows, and ctrl-a select more.
+    selection: HashSet<PathBuf>,
+    /// Where a shift-selected range starts.
+    anchor: Option<PathBuf>,
     /// The desktop shell, once detected; `None` while detecting or when no
     /// supported shell runs.
     desktop: Option<Arc<dyn WallpaperBackend>>,
@@ -147,6 +158,8 @@ impl LibraryGrid {
             marks: ImageMarks::default(),
             thumbnails: HashMap::new(),
             selected: None,
+            selection: HashSet::new(),
+            anchor: None,
             desktop: None,
             trash,
             current_wallpaper: None,
@@ -213,8 +226,9 @@ impl LibraryGrid {
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
     }
 
-    /// Recomputes the shown images. The selection is kept by path; while its
-    /// image is filtered out, nothing is selected in the grid.
+    /// Recomputes the shown images. The current image is kept by path; while
+    /// it is filtered out, no image is current. Images the filter hides leave
+    /// the selection, so actions on it never reach images out of sight.
     fn apply_filter(&mut self, cx: &mut Context<Self>) {
         let images = self
             .all
@@ -222,6 +236,9 @@ impl LibraryGrid {
             .filter(|image| self.filter.matches(image, &self.marks))
             .cloned()
             .collect();
+        let images: Vec<ImageFile> = images;
+        let shown: HashSet<&Path> = images.iter().map(ImageFile::path).collect();
+        self.selection.retain(|path| shown.contains(path.as_path()));
         self.images = Arc::new(images);
         self.generate_thumbnails(cx);
         cx.notify();
@@ -345,14 +362,27 @@ impl LibraryGrid {
         self.loaded.then_some(self.all.len())
     }
 
-    /// Asks whether to move the selected image to the trash.
+    /// Asks whether to move the selected images to the trash.
     pub fn confirm_delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.selected.clone() else {
-            return;
-        };
-        if self.selected_ix().is_none() {
-            return;
+        let paths = self.selected_paths();
+        match paths.as_slice() {
+            [] => {}
+            [path] => self.confirm_delete(path.clone(), window, cx),
+            _ => self.confirm_delete_several(paths, window, cx),
         }
+    }
+
+    /// Asks whether to move the current image to the trash, whatever else is
+    /// selected: what the detail view deletes.
+    pub fn confirm_delete_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_ix().is_some()
+            && let Some(path) = self.selected.clone()
+        {
+            self.confirm_delete(path, window, cx);
+        }
+    }
+
+    fn confirm_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let name = path
             .file_name()
             .unwrap_or(path.as_os_str())
@@ -375,48 +405,120 @@ impl LibraryGrid {
                 .ok_text("Move to Trash")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
-                    grid.update(cx, |grid, cx| grid.delete_image(path.clone(), window, cx))
+                    grid.update(cx, |grid, cx| {
+                        grid.delete_images(vec![path.clone()], window, cx)
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
+    fn confirm_delete_several(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString = format!(
+            "Move {} to Trash?",
+            format::count(paths.len(), "image", "images")
+        )
+        .into();
+        let description: SharedString = if paths.iter().any(|path| self.is_current_wallpaper(path))
+        {
+            "One of them is your current wallpaper. You can restore them from the trash.".into()
+        } else {
+            "You can restore them from the trash.".into()
+        };
+        let grid = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let grid = grid.clone();
+            let paths = paths.clone();
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .confirm()
+                .ok_text("Move to Trash")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    grid.update(cx, |grid, cx| grid.delete_images(paths.clone(), window, cx))
                         .ok();
                     true
                 })
         });
     }
 
-    /// Moves the image at `path` to the trash and takes it out of the grid,
-    /// selecting the image that took its place.
-    fn delete_image(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Moves the images at `paths` to the trash and takes them out of the grid.
+    /// Images the trash refuses stay, and an error names how many.
+    fn delete_images(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.root.clone();
         let database = self.paths.database_file();
         let trash = self.trash.clone();
+        let count = paths.len();
         cx.spawn_in(window, async move |this, cx| {
-            let deleted = path.clone();
             let result = cx
                 .background_spawn(async move {
-                    Library::open(&root, &database)?.delete_image(&deleted, trash.as_ref())
+                    Library::open(&root, &database)?.delete_images(&paths, trash.as_ref())
                 })
                 .await;
-            this.update_in(cx, |grid, window, cx| match result {
-                Ok(()) => grid.remove_from_view(&path, cx),
-                Err(error) => window.push_notification(
-                    Notification::error(error.to_string())
-                        .title("Couldn't move the image to the trash"),
-                    cx,
-                ),
+            this.update_in(cx, |grid, window, cx| {
+                let (title, message) = match result {
+                    Ok(deletion) => {
+                        grid.remove_from_view(deletion.deleted(), cx);
+                        let Some((_, message)) = deletion.failed().first() else {
+                            return;
+                        };
+                        let failed = deletion.failed().len();
+                        let title = if count == 1 {
+                            "Couldn't move the image to the trash".to_owned()
+                        } else {
+                            format!(
+                                "Couldn't move {} of {} images to the trash",
+                                format::grouped(failed),
+                                format::grouped(count)
+                            )
+                        };
+                        (title, message.clone())
+                    }
+                    Err(error) => (
+                        "Couldn't move the images to the trash".to_owned(),
+                        error.to_string(),
+                    ),
+                };
+                window.push_notification(Notification::error(message).title(title), cx);
             })
             .ok();
         })
         .detach();
     }
 
-    fn remove_from_view(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let ix = self.images.iter().position(|image| image.path() == path);
-        self.all.retain(|image| image.path() != path);
-        self.marks.remove(path);
-        self.thumbnails.remove(path);
+    /// Takes deleted images out of the grid. If the current image went, the
+    /// image that took the place of the first one deleted becomes current.
+    fn remove_from_view(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let removed: HashSet<&PathBuf> = paths.iter().collect();
+        let first = self
+            .images
+            .iter()
+            .position(|image| removed.contains(&image.path().to_path_buf()));
+        self.all
+            .retain(|image| !removed.contains(&image.path().to_path_buf()));
+        for path in paths {
+            self.marks.remove(path);
+            self.thumbnails.remove(path);
+            self.selection.remove(path);
+        }
         self.apply_filter(cx);
-        if self.selected.as_deref() == Some(path) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| removed.contains(selected))
+        {
             self.selected = None;
-            if let Some(ix) = ix.filter(|_| !self.images.is_empty()) {
+            if let Some(ix) = first.filter(|_| !self.images.is_empty()) {
                 self.select(ix.min(self.images.len() - 1), cx);
             }
         }
@@ -478,15 +580,112 @@ impl LibraryGrid {
             .position(|image| image.path() == selected)
     }
 
-    /// Selects the image at `ix` and scrolls it into view.
+    /// Makes the image at `ix` current and the only one selected, and scrolls
+    /// it into view.
     pub fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(image) = self.images.get(ix) else {
             return;
         };
-        self.selected = Some(image.path().to_path_buf());
+        let path = image.path().to_path_buf();
+        self.selection = HashSet::from([path.clone()]);
+        self.anchor = Some(path.clone());
+        self.selected = Some(path);
         self.scroll_handle
             .scroll_to_item(ix / self.columns, ScrollStrategy::Nearest);
         cx.notify();
+    }
+
+    /// Makes the image at `ix` current, and adds it to the selection or takes
+    /// it out, as ctrl-click does.
+    pub fn toggle_selected(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.images.get(ix).map(|image| image.path().to_path_buf()) else {
+            return;
+        };
+        if !self.selection.remove(&path) {
+            self.selection.insert(path.clone());
+        }
+        self.anchor = Some(path.clone());
+        self.selected = Some(path);
+        cx.notify();
+    }
+
+    /// Selects the images from the anchor to `ix` and makes `ix` current, as
+    /// shift-click does. Without an anchor, the range starts at the current
+    /// image.
+    pub fn select_range(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.images.get(ix).map(|image| image.path().to_path_buf()) else {
+            return;
+        };
+        let start = self
+            .anchor
+            .as_ref()
+            .or(self.selected.as_ref())
+            .and_then(|anchor| self.images.iter().position(|image| image.path() == anchor))
+            .unwrap_or(ix);
+        let range = start.min(ix)..=start.max(ix);
+        self.selection = self.images[range]
+            .iter()
+            .map(|image| image.path().to_path_buf())
+            .collect();
+        if self.anchor.is_none() {
+            self.anchor = Some(self.images[start].path().to_path_buf());
+        }
+        self.selected = Some(path);
+        self.scroll_handle
+            .scroll_to_item(ix / self.columns, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Extends the range by moving the current image `offset` places.
+    fn extend_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
+        if self.images.is_empty() {
+            return;
+        }
+        let ix = match self.selected_ix() {
+            Some(ix) => ix.saturating_add_signed(offset).min(self.images.len() - 1),
+            None => 0,
+        };
+        self.select_range(ix, cx);
+    }
+
+    /// Selects every shown image.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection = self
+            .images
+            .iter()
+            .map(|image| image.path().to_path_buf())
+            .collect();
+        if self.selected_ix().is_none() {
+            self.selected = self.images.first().map(|image| image.path().to_path_buf());
+        }
+        cx.notify();
+    }
+
+    /// Shrinks the selection to the current image.
+    fn collapse_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection = self.selected.iter().cloned().collect();
+        self.anchor = self.selected.clone();
+        cx.notify();
+    }
+
+    /// How many shown images are selected.
+    #[cfg(test)]
+    pub fn selection_count(&self) -> usize {
+        self.selection.len()
+    }
+
+    #[cfg(test)]
+    pub fn is_in_selection(&self, path: &Path) -> bool {
+        self.selection.contains(path)
+    }
+
+    /// The selected images, in display order.
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.images
+            .iter()
+            .filter(|image| self.selection.contains(image.path()))
+            .map(|image| image.path().to_path_buf())
+            .collect()
     }
 
     /// Moves the selection by `offset` images, staying within the library.
@@ -634,10 +833,13 @@ impl LibraryGrid {
         window.focus(&focus_handle, cx);
     }
 
-    /// Escape in the tag field: clears what is typed, then returns to the
-    /// images.
-    fn leave_tag_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tag_query.read(cx).value().is_empty() {
+    /// Escape: in the tag field, clears what is typed, then returns to the
+    /// images; among the images, shrinks the selection to the current image.
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.tag_query.read(cx);
+        if !query.focus_handle(cx).is_focused(window) {
+            self.collapse_selection(cx);
+        } else if !query.value().is_empty() {
             self.tag_query
                 .update(cx, |query, cx| query.set_value("", window, cx));
         } else {
@@ -774,13 +976,25 @@ impl LibraryGrid {
             .w(width)
             .h(height)
             .child(picture)
-            .when(selected, |tile| tile.child(tiles::selection_ring(rem, cx)))
+            .map(|tile| match (self.selection.contains(path), selected) {
+                (true, _) => tile.child(tiles::selection_ring(rem, cx)),
+                // The keyboard's position, after ctrl-click took it out.
+                (false, true) => tile.child(tiles::current_ring(rem, cx)),
+                (false, false) => tile,
+            })
             .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
             .on_click(cx.listener(move |grid, event: &ClickEvent, window, cx| {
                 window.focus(&grid.focus_handle, cx);
-                grid.select(ix, cx);
-                if event.click_count() == 2 {
-                    cx.emit(OpenImage);
+                let modifiers = event.modifiers();
+                if modifiers.shift {
+                    grid.select_range(ix, cx);
+                } else if modifiers.secondary() {
+                    grid.toggle_selected(ix, cx);
+                } else {
+                    grid.select(ix, cx);
+                    if event.click_count() == 2 {
+                        cx.emit(OpenImage);
+                    }
                 }
             }))
             .into_any_element()
@@ -824,11 +1038,16 @@ impl Render for LibraryGrid {
                     grid.focus_tag_filter(window, cx)
                 }),
             )
-            .on_action(
-                cx.listener(|grid, _: &LeaveTagFilter, window, cx| {
-                    grid.leave_tag_filter(window, cx)
-                }),
-            )
+            .on_action(cx.listener(|grid, _: &Dismiss, window, cx| grid.dismiss(window, cx)))
+            .on_action(cx.listener(|grid, _: &ExtendLeft, _, cx| grid.extend_selection(-1, cx)))
+            .on_action(cx.listener(|grid, _: &ExtendRight, _, cx| grid.extend_selection(1, cx)))
+            .on_action(cx.listener(|grid, _: &ExtendUp, _, cx| {
+                grid.extend_selection(-(grid.columns as isize), cx)
+            }))
+            .on_action(cx.listener(|grid, _: &ExtendDown, _, cx| {
+                grid.extend_selection(grid.columns as isize, cx)
+            }))
+            .on_action(cx.listener(|grid, _: &SelectAll, _, cx| grid.select_all(cx)))
             .on_action(cx.listener(|grid, _: &OpenSelected, _, cx| {
                 if grid.selected.is_some() {
                     cx.emit(OpenImage);
@@ -961,6 +1180,39 @@ impl LibraryGrid {
                     .prefix(Icon::new(IconName::Search).small()),
             )
             .child(div().flex_1())
+            // Several selected: say so, and offer what applies to all of them, so
+            // batch deletion doesn't depend on knowing the Delete key.
+            .when(self.selection.len() > 1, |toolbar| {
+                toolbar
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "{} selected",
+                                format::grouped(self.selection.len())
+                            )),
+                    )
+                    .child(
+                        Button::new("move-selection-to-trash")
+                            .danger()
+                            .outline()
+                            .small()
+                            .label("Move to Trash…")
+                            .tooltip("Delete")
+                            .on_click(cx.listener(|grid, _, window, cx| {
+                                grid.confirm_delete_selected(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("deselect")
+                            .ghost()
+                            .small()
+                            .label("Deselect")
+                            .tooltip("Esc")
+                            .on_click(cx.listener(|grid, _, _, cx| grid.collapse_selection(cx))),
+                    )
+            })
             .when(!self.filter.is_empty(), |toolbar| {
                 toolbar.child(
                     div()
@@ -1481,5 +1733,138 @@ mod tests {
         assert_eq!(shown(cx), ["0.png"]);
         act(cx, &|window, cx| window.click("remove-filter-tag-lake", cx));
         assert_eq!(shown(cx), ["0.png", "1.png", "2.png"]);
+    }
+    /// Clicks the element `id` while holding `modifiers`.
+    fn click_with(
+        window: &mut gpui_kit::Window,
+        id: SharedString,
+        modifiers: gpui_kit::Modifiers,
+        cx: &mut gpui_kit::App,
+    ) {
+        use gpui_kit::{
+            InputEvent as _, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        };
+        window.render_frame(cx);
+        let position = window.find(id).bounds().center();
+        let move_to = MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers,
+        };
+        window.dispatch_event(move_to.to_platform_input(), cx);
+        let down = MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        };
+        window.dispatch_event(down.to_platform_input(), cx);
+        let up = MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+        };
+        window.dispatch_event(up.to_platform_input(), cx);
+        window.render_frame(cx);
+    }
+
+    #[gpui_kit::test]
+    fn modifier_clicks_shift_arrows_and_ctrl_a_build_a_selection(cx: &mut TestAppContext) {
+        let fixture = library(6);
+        let (window, grid) = open_grid(&fixture, cx);
+        let ids: Vec<_> = (0..6).map(|ix| tile_id(&grid, ix, cx)).collect();
+        let count = |cx: &mut TestAppContext| cx.update(|cx| grid.read(cx).selection_count());
+        let ctrl = gpui_kit::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let shift = gpui_kit::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let act = |cx: &mut TestAppContext,
+                   act: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| act(window, cx))
+                .unwrap();
+        };
+
+        act(cx, &|window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click(ids[0].clone(), cx);
+        });
+        assert_eq!(count(cx), 1);
+
+        act(cx, &|window, cx| {
+            click_with(window, ids[2].clone(), ctrl, cx)
+        });
+        assert_eq!(count(cx), 2);
+        assert_eq!(selected_ix(&grid, cx), Some(2));
+
+        // Shift selects from the last ctrl-clicked image.
+        act(cx, &|window, cx| {
+            click_with(window, ids[4].clone(), shift, cx)
+        });
+        assert_eq!(count(cx), 3, "images 2 to 4");
+        act(cx, &|window, cx| window.press("shift-left", cx));
+        assert_eq!(count(cx), 2, "images 2 and 3");
+        assert_eq!(selected_ix(&grid, cx), Some(3));
+
+        act(cx, &|window, cx| window.press("ctrl-a", cx));
+        assert_eq!(count(cx), 6);
+        act(cx, &|window, cx| window.press("escape", cx));
+        assert_eq!(count(cx), 1);
+        assert_eq!(selected_ix(&grid, cx), Some(3), "the current image stays");
+
+        // Ctrl-click can take out the current image; it stays current.
+        act(cx, &|window, cx| {
+            click_with(window, ids[3].clone(), ctrl, cx)
+        });
+        assert_eq!(count(cx), 0);
+        assert_eq!(selected_ix(&grid, cx), Some(3));
+        // Plain movement selects one image again.
+        act(cx, &|window, cx| window.press("right", cx));
+        assert_eq!(count(cx), 1);
+        let current = cx.update(|cx| grid.read(cx).images()[4].path().to_path_buf());
+        assert!(cx.update(|cx| grid.read(cx).is_in_selection(&current)));
+    }
+
+    #[gpui_kit::test]
+    fn the_selection_is_moved_to_the_trash_together(cx: &mut TestAppContext) {
+        let fixture = library(4);
+        let (window, grid) = open_grid(&fixture, cx);
+        let ids: Vec<_> = (0..4).map(|ix| tile_id(&grid, ix, cx)).collect();
+        let doomed: Vec<_> = (0..3)
+            .map(|ix| cx.update(|cx| grid.read(cx).images()[ix].path().to_path_buf()))
+            .collect();
+        let shift = gpui_kit::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click(ids[0].clone(), cx);
+            click_with(window, ids[2].clone(), shift, cx);
+            window.click("move-selection-to-trash", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        for path in &doomed {
+            assert!(!fixture.root.join(path).exists());
+            assert!(fixture.trash_dir.join(path.file_name().unwrap()).exists());
+        }
+        assert_eq!(cx.update(|cx| grid.read(cx).images().len()), 1);
+        assert_eq!(selected_ix(&grid, cx), Some(0), "the image left is current");
+        assert_eq!(cx.update(|cx| grid.read(cx).selection_count()), 1);
     }
 }

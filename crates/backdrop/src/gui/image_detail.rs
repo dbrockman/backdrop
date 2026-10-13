@@ -477,7 +477,7 @@ impl ImageDetail {
                             .tooltip("Delete")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.grid
-                                    .update(cx, |grid, cx| grid.confirm_delete_selected(window, cx))
+                                    .update(cx, |grid, cx| grid.confirm_delete_current(window, cx))
                             })),
                     ),
             )
@@ -688,7 +688,7 @@ impl Render for ImageDetail {
             .on_action(cx.listener(|this, _: &NextImage, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
                 this.grid
-                    .update(cx, |grid, cx| grid.confirm_delete_selected(window, cx))
+                    .update(cx, |grid, cx| grid.confirm_delete_current(window, cx))
             }))
             .on_action(cx.listener(|this, _: &SetWallpaper, window, cx| {
                 this.grid

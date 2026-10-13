@@ -152,6 +152,25 @@ impl Trash for SystemTrash {
     }
 }
 
+/// The outcome of [`Library::delete_images`].
+#[derive(Debug, Default)]
+pub struct Deletion {
+    deleted: Vec<PathBuf>,
+    failed: Vec<(PathBuf, String)>,
+}
+
+impl Deletion {
+    /// The images moved to the trash.
+    pub fn deleted(&self) -> &[PathBuf] {
+        &self.deleted
+    }
+
+    /// The images the trash refused, with its reason.
+    pub fn failed(&self) -> &[(PathBuf, String)] {
+        &self.failed
+    }
+}
+
 /// A library folder and a connection to its index. Open one per thread.
 pub struct Library {
     root: PathBuf,
@@ -259,23 +278,54 @@ impl Library {
     /// Once the file is in the trash this succeeds even if the metadata can't
     /// be updated; the next scan removes the record of the missing image.
     pub fn delete_image(&mut self, path: &Path, trash: &dyn Trash) -> Result<(), LibraryError> {
-        if !self.indexed_sizes()?.contains_key(path) {
-            return Err(LibraryError::NotInLibrary {
-                path: path.to_path_buf(),
-            });
+        let deletion = self.delete_images(&[path.to_path_buf()], trash)?;
+        match deletion.failed.into_iter().next() {
+            Some((path, message)) => Err(LibraryError::Trash {
+                path: self.root.join(path),
+                message,
+            }),
+            None => Ok(()),
         }
-        let file = self.root.join(path);
-        trash.trash(&file).map_err(|message| LibraryError::Trash {
-            path: file,
-            message,
-        })?;
-        self.index.remove(path)?;
-        if let Ok((metadata, Some(record))) =
-            LibraryMetadata::update(&self.root, |metadata| Ok(metadata.remove(path)))
+    }
+
+    /// Moves the indexed images at `paths` to `trash` and forgets them, as
+    /// [`Library::delete_image`] does. Every path is checked before any image
+    /// is moved. An image the trash refuses stays and is reported; the others
+    /// are still moved. The metadata file is rewritten once for all of them.
+    pub fn delete_images(
+        &mut self,
+        paths: &[PathBuf],
+        trash: &dyn Trash,
+    ) -> Result<Deletion, LibraryError> {
+        let indexed = self.indexed_sizes()?;
+        if let Some(path) = paths.iter().find(|path| !indexed.contains_key(*path)) {
+            return Err(LibraryError::NotInLibrary { path: path.clone() });
+        }
+        let mut deletion = Deletion::default();
+        let mut seen = HashSet::new();
+        for path in paths.iter().filter(|path| seen.insert(*path)) {
+            match trash.trash(&self.root.join(path)) {
+                Ok(()) => {
+                    self.index.remove(path)?;
+                    deletion.deleted.push(path.clone());
+                }
+                Err(message) => deletion.failed.push((path.clone(), message)),
+            }
+        }
+        // The images are in the trash; a metadata failure leaves records of
+        // missing images, which the next scan removes.
+        if !deletion.deleted.is_empty()
+            && let Ok((metadata, removed)) = LibraryMetadata::update(&self.root, |metadata| {
+                Ok(deletion
+                    .deleted
+                    .iter()
+                    .filter_map(|path| metadata.remove(path))
+                    .collect::<Vec<_>>())
+            })
         {
-            remove_orphaned_snapshots(&self.root, &metadata, &[record]);
+            remove_orphaned_snapshots(&self.root, &metadata, &removed);
         }
-        Ok(())
+        Ok(deletion)
     }
 
     /// Removes the records for `paths` whose images are still missing, and
@@ -764,6 +814,79 @@ mod tests {
         assert!(matches!(result, Err(LibraryError::Trash { .. })));
         assert!(fixture.root().join("a.png").exists());
         assert_eq!(fixture.library.images(ImageOrder::Path).unwrap().len(), 1);
+    }
+
+    /// A trash that refuses files with this name and accepts the rest.
+    struct PickyTrash(PathBuf, &'static str);
+
+    impl Trash for PickyTrash {
+        fn trash(&self, file: &Path) -> Result<(), String> {
+            if file.file_name().unwrap() == self.1 {
+                return Err("in use".to_owned());
+            }
+            FolderTrash(self.0.clone()).trash(file)
+        }
+    }
+
+    #[test]
+    fn several_images_are_deleted_and_refused_ones_kept() {
+        let mut fixture = Fixture::new();
+        for (seed, name) in ["a.png", "b.png", "c.png", "d.png"].into_iter().enumerate() {
+            fixture.write(name, &png(10, 10, seed as u8));
+        }
+        fixture.scan();
+        fixture.favorite("a.png");
+        fixture.favorite("b.png");
+        fixture.favorite("d.png");
+        let trash = tempfile::tempdir().unwrap();
+
+        let deletion = fixture
+            .library
+            .delete_images(
+                &[
+                    PathBuf::from("a.png"),
+                    PathBuf::from("b.png"),
+                    PathBuf::from("c.png"),
+                    PathBuf::from("a.png"),
+                ],
+                &PickyTrash(trash.path().into(), "b.png"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            deletion.deleted(),
+            [PathBuf::from("a.png"), PathBuf::from("c.png")]
+        );
+        assert_eq!(
+            deletion.failed(),
+            [(PathBuf::from("b.png"), "in use".to_owned())]
+        );
+        assert!(fixture.root().join("b.png").exists());
+        assert_eq!(fixture.favorites(), ["b.png", "d.png"]);
+        let paths: Vec<_> = fixture
+            .library
+            .images(ImageOrder::Path)
+            .unwrap()
+            .iter()
+            .map(|image| image.path().to_path_buf())
+            .collect();
+        assert_eq!(paths, [PathBuf::from("b.png"), PathBuf::from("d.png")]);
+    }
+
+    #[test]
+    fn nothing_is_deleted_when_one_image_is_not_in_the_library() {
+        let mut fixture = Fixture::new();
+        fixture.write("a.png", &png(10, 10, 1));
+        fixture.scan();
+        let trash = tempfile::tempdir().unwrap();
+
+        let result = fixture.library.delete_images(
+            &[PathBuf::from("a.png"), PathBuf::from("missing.png")],
+            &FolderTrash(trash.path().into()),
+        );
+
+        assert!(matches!(result, Err(LibraryError::NotInLibrary { .. })));
+        assert!(fixture.root().join("a.png").exists());
     }
 
     #[test]

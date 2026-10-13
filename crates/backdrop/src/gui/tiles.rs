@@ -60,3 +60,19 @@ pub fn picture_badge(label: impl Into<SharedString>, cx: &App) -> Div {
         .text_xs()
         .child(label.into())
 }
+
+/// The ring around the current image when it isn't selected: thinner and
+/// muted, so the keyboard's position stays visible without looking selected.
+pub fn current_ring(rem: Pixels, cx: &App) -> Div {
+    let theme = cx.theme();
+    let offset = rem * SELECTION_OFFSET;
+    div()
+        .absolute()
+        .top(-offset)
+        .left(-offset)
+        .right(-offset)
+        .bottom(-offset)
+        .rounded(theme.radius + offset)
+        .border_1()
+        .border_color(theme.muted_foreground)
+}

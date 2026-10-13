@@ -362,7 +362,8 @@ fn find_image<'a>(
     }
 }
 
-/// Moves images to the trash. All paths are checked before any is moved.
+/// Moves images to the trash. All paths are checked before any is moved, and
+/// one the trash refuses doesn't stop the others.
 fn delete(paths: &AppPaths, images: &[PathBuf]) -> anyhow::Result<()> {
     let (mut library, _) = scan(paths)?;
     let indexed = library.images(ImageOrder::Path)?;
@@ -370,9 +371,22 @@ fn delete(paths: &AppPaths, images: &[PathBuf]) -> anyhow::Result<()> {
         .iter()
         .map(|image| Ok(find_image(&library, &indexed, image)?.path().to_path_buf()))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    for image in images {
-        library.delete_image(&image, &SystemTrash)?;
-        println!("moved to trash: {}", library.root().join(&image).display());
+    let deletion = library.delete_images(&images, &SystemTrash)?;
+    for image in deletion.deleted() {
+        println!("moved to trash: {}", library.root().join(image).display());
+    }
+    for (image, message) in deletion.failed() {
+        eprintln!(
+            "error: could not move {} to the trash: {message}",
+            library.root().join(image).display()
+        );
+    }
+    if !deletion.failed().is_empty() {
+        bail!(
+            "{} of {} images could not be moved to the trash",
+            deletion.failed().len(),
+            images.len()
+        );
     }
     Ok(())
 }

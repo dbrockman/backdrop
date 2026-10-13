@@ -727,7 +727,7 @@ The goal is a useful offline wallpaper browser.
 - [x] User-defined tags
 - [x] Tag autocomplete and multi-tag filtering
 - [ ] Favorites
-- [ ] Multi-selection and batch deletion
+- [x] Multi-selection and batch deletion
 - [ ] Git status detection
 - [ ] Git status indicators and filters
 - [ ] Additional sorting and filtering options
