@@ -15,8 +15,11 @@ backdrop-core = { path = "crates/backdrop-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 gpui-kit = "=0.7.1"
 thiserror = "2"
+toml = "1"
 
 [profile.release]
 lto = "thin"

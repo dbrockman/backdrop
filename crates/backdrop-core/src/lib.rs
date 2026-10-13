@@ -5,3 +5,4 @@
 //! use the same behavior, database, and configuration.
 
 pub mod paths;
+pub mod settings;

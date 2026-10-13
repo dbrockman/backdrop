@@ -595,7 +595,10 @@ name = "backdrop-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "serde",
+ "tempfile",
  "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -2306,7 +2309,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3253,7 +3256,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
