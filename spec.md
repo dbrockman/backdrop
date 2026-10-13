@@ -660,7 +660,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Asynchronous thumbnail generation and caching
 - [x] Image grid
 - [x] Image detail view
-- [ ] Filter by orientation and sort by date
+- [x] Filter by orientation and sort by date
 - [ ] Niri wallpaper integration
 - [ ] Highlight the current wallpaper
 - [ ] Set wallpaper

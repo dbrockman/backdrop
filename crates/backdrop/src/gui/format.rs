@@ -8,7 +8,8 @@ pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{} {}", grouped(n), if n == 1 { one } else { many })
 }
 
-fn grouped(n: usize) -> String {
+/// `n` with thousands separators, e.g. "1,234".
+pub fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut grouped = String::new();
     for (ix, digit) in digits.chars().enumerate() {

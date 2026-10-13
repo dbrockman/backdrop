@@ -11,10 +11,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use backdrop_core::image::ImageFile;
-use backdrop_core::index::ImageOrder;
+use backdrop_core::image::Orientation;
 use backdrop_core::library::Library;
 use backdrop_core::paths::AppPaths;
+use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::thumbnails::Thumbnails;
+use gpui_kit::component::button::{
+    Button, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tooltip::Tooltip;
@@ -24,6 +29,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::format;
 use super::image_cache::LruImageCache;
 
 pub const KEY_CONTEXT: &str = "LibraryGrid";
@@ -66,8 +72,12 @@ enum Thumbnail {
 pub struct LibraryGrid {
     root: PathBuf,
     paths: AppPaths,
-    /// In display order.
+    /// Every image in the library, sorted by `order`.
+    all: Vec<ImageFile>,
+    /// The images shown: `all` narrowed by `filter`.
     images: Arc<Vec<ImageFile>>,
+    order: ImageOrder,
+    filter: ImageFilter,
     favorites: HashSet<PathBuf>,
     /// Keyed by image path; images without an entry are still being prepared.
     thumbnails: HashMap<PathBuf, Thumbnail>,
@@ -88,11 +98,14 @@ pub struct LibraryGrid {
 
 impl LibraryGrid {
     pub fn new(root: PathBuf, paths: AppPaths, cx: &mut Context<Self>) -> Self {
-        let load_task = Self::load(&root, &paths, cx);
+        let load_task = Self::load(&root, &paths, ImageOrder::default(), cx);
         Self {
             root,
             paths,
+            all: Vec::new(),
             images: Arc::new(Vec::new()),
+            order: ImageOrder::default(),
+            filter: ImageFilter::default(),
             favorites: HashSet::new(),
             thumbnails: HashMap::new(),
             selected: None,
@@ -113,17 +126,17 @@ impl LibraryGrid {
     /// Reads the images and favorites from the index, which the caller has
     /// just brought up to date.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self._load_task = Self::load(&self.root, &self.paths, cx);
+        self._load_task = Self::load(&self.root, &self.paths, self.order, cx);
     }
 
-    fn load(root: &Path, paths: &AppPaths, cx: &mut Context<Self>) -> Task<()> {
+    fn load(root: &Path, paths: &AppPaths, order: ImageOrder, cx: &mut Context<Self>) -> Task<()> {
         let root = root.to_path_buf();
         let database = paths.database_file();
         cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_spawn(async move {
                     let library = Library::open(&root, &database)?;
-                    anyhow::Ok((library.images(ImageOrder::Added)?, library.favorites()?))
+                    anyhow::Ok((library.images(order)?, library.favorites()?))
                 })
                 .await;
             // A failed load leaves the grid as it was; the scan that preceded
@@ -132,19 +145,52 @@ impl LibraryGrid {
                 return;
             };
             this.update(cx, |grid, cx| {
-                grid.images = Arc::new(images);
+                grid.all = images;
                 grid.favorites = favorites;
-                grid.generate_thumbnails(cx);
-                cx.notify();
+                grid.apply_filter(cx);
             })
             .ok();
         })
     }
 
-    /// Creates missing thumbnails in display order, a few at a time on the
-    /// background executor, and shows each batch as it completes.
+    /// Shows the images in this order, keeping the filter.
+    pub fn set_order(&mut self, order: ImageOrder, cx: &mut Context<Self>) {
+        self.order = order;
+        order.sort(&mut self.all);
+        self.apply_filter(cx);
+        self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    pub fn set_filter(&mut self, filter: ImageFilter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.apply_filter(cx);
+        self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+    }
+
+    /// Recomputes the shown images. The selection is kept by path; while its
+    /// image is filtered out, nothing is selected in the grid.
+    fn apply_filter(&mut self, cx: &mut Context<Self>) {
+        let images = self
+            .all
+            .iter()
+            .filter(|image| self.filter.matches(image, &self.favorites))
+            .cloned()
+            .collect();
+        self.images = Arc::new(images);
+        self.generate_thumbnails(cx);
+        cx.notify();
+    }
+
+    /// Creates missing thumbnails of the shown images in display order, a few
+    /// at a time on the background executor, and shows each batch as it
+    /// completes.
     fn generate_thumbnails(&mut self, cx: &mut Context<Self>) {
-        let images = self.images.clone();
+        let images: Vec<ImageFile> = self
+            .images
+            .iter()
+            .filter(|image| !self.thumbnails.contains_key(image.path()))
+            .cloned()
+            .collect();
         let root = self.root.clone();
         let thumbnails = Thumbnails::new(self.paths.thumbnails_dir());
         let batch_size = std::thread::available_parallelism().map_or(4, |n| n.get()) * 2;
@@ -284,6 +330,9 @@ impl LibraryGrid {
             self.favorites.insert(path.to_path_buf());
         } else {
             self.favorites.remove(path);
+        }
+        if self.filter.is_favorites_only() {
+            self.apply_filter(cx);
         }
         cx.notify();
     }
@@ -461,32 +510,187 @@ impl Render for LibraryGrid {
                     grid.toggle_favorite(window, cx)
                 }),
             )
-            .relative()
+            .flex()
+            .flex_col()
             .size_full()
+            .child(self.render_toolbar(cx))
             .child(
-                // Measures the grid; the column count depends on its width.
-                canvas(
-                    move |bounds, _, cx| {
-                        grid.update(cx, |grid, cx| grid.set_width(bounds.size.width, cx))
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
-            .child(
-                image_cache(self.image_cache.clone()).size_full().child(
-                    uniform_list(
-                        "library-grid-rows",
-                        rows,
-                        cx.processor(|grid, rows, window, cx| grid.render_rows(rows, window, cx)),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        // Measures the grid; the column count depends on its width.
+                        canvas(
+                            move |bounds, _, cx| {
+                                grid.update(cx, |grid, cx| grid.set_width(bounds.size.width, cx))
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
                     )
-                    .pt(window.rem_size() * PADDING)
-                    .track_scroll(&self.scroll_handle)
-                    .size_full(),
-                ),
+                    .map(|area| {
+                        if self.images.is_empty() && !self.all.is_empty() {
+                            return area.child(self.render_no_matches(cx));
+                        }
+                        area.child(
+                            image_cache(self.image_cache.clone()).size_full().child(
+                                uniform_list(
+                                    "library-grid-rows",
+                                    rows,
+                                    cx.processor(|grid, rows, window, cx| {
+                                        grid.render_rows(rows, window, cx)
+                                    }),
+                                )
+                                .pt(window.rem_size() * PADDING)
+                                .track_scroll(&self.scroll_handle)
+                                .size_full(),
+                            ),
+                        )
+                        .child(Scrollbar::vertical(&self.scroll_handle))
+                    }),
             )
-            .child(Scrollbar::vertical(&self.scroll_handle))
+    }
+}
+
+const ORIENTATIONS: [(Option<Orientation>, &str); 4] = [
+    (None, "All"),
+    (Some(Orientation::Landscape), "Landscape"),
+    (Some(Orientation::Portrait), "Portrait"),
+    (Some(Orientation::Square), "Square"),
+];
+
+const ORDERS: [(ImageOrder, &str); 4] = [
+    (ImageOrder::Added, "Recently Added"),
+    (ImageOrder::Modified, "Recently Modified"),
+    (ImageOrder::Name, "Name"),
+    (ImageOrder::Resolution, "Resolution"),
+];
+
+impl LibraryGrid {
+    /// Sorting and filtering, always visible above the grid so the current
+    /// view is never a hidden state.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let orientation = self.filter.orientation();
+        let order = self.order;
+        let order_name = ORDERS
+            .iter()
+            .find(|(candidate, _)| *candidate == order)
+            .map_or("", |(_, name)| *name);
+        let grid = cx.entity();
+
+        h_flex()
+            .flex_none()
+            .px(rems(PADDING))
+            .py_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                ToggleGroup::new("orientation")
+                    .segmented()
+                    .outline()
+                    .children(ORIENTATIONS.iter().map(|(candidate, name)| {
+                        Toggle::new(*name)
+                            .label(*name)
+                            .checked(*candidate == orientation)
+                    }))
+                    .on_click(cx.listener(|grid, checks: &Vec<bool>, _, cx| {
+                        // A pick-one control: the newly checked item wins, and
+                        // clicking the checked item again leaves it checked.
+                        let current = ORIENTATIONS
+                            .iter()
+                            .position(|(candidate, _)| *candidate == grid.filter.orientation());
+                        let picked = checks
+                            .iter()
+                            .enumerate()
+                            .find(|(ix, checked)| **checked && Some(*ix) != current)
+                            .map(|(ix, _)| ix);
+                        if let Some(ix) = picked {
+                            let filter = grid.filter.clone().with_orientation(ORIENTATIONS[ix].0);
+                            grid.set_filter(filter, cx);
+                        }
+                    })),
+            )
+            .child(
+                Toggle::new("favorites-only")
+                    .outline()
+                    .label("Favorites")
+                    .checked(self.filter.is_favorites_only())
+                    .on_click(cx.listener(|grid, checked: &bool, _, cx| {
+                        let filter = grid.filter.clone().with_favorites_only(*checked);
+                        grid.set_filter(filter, cx);
+                    })),
+            )
+            .child(div().flex_1())
+            .when(!self.filter.is_empty(), |toolbar| {
+                toolbar.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{} of {}",
+                            format::grouped(self.images.len()),
+                            format::count(self.all.len(), "image", "images")
+                        )),
+                )
+            })
+            .child(
+                Button::new("sort")
+                    .ghost()
+                    .small()
+                    .icon(IconName::SortDescending)
+                    .label(order_name)
+                    .tooltip("Sort by")
+                    .dropdown_menu(move |menu, _, _| {
+                        ORDERS.iter().fold(menu, |menu, (candidate, name)| {
+                            let candidate = *candidate;
+                            let grid = grid.clone();
+                            menu.item(
+                                PopupMenuItem::new(*name)
+                                    .checked(candidate == order)
+                                    .on_click(move |_, _, cx| {
+                                        grid.update(cx, |grid, cx| grid.set_order(candidate, cx))
+                                    }),
+                            )
+                        })
+                    }),
+            )
+    }
+
+    fn render_no_matches(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = match (self.filter.orientation(), self.filter.is_favorites_only()) {
+            (Some(Orientation::Landscape), false) => "No landscape images",
+            (Some(Orientation::Portrait), false) => "No portrait images",
+            (Some(Orientation::Square), false) => "No square images",
+            (None, true) => "No favorites yet",
+            _ => "No images match",
+        };
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(title)
+            .when(self.filter.is_favorites_only(), |empty| {
+                empty.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Select an image and press F to mark it as a favorite."),
+                )
+            })
+            .child(
+                Button::new("show-all")
+                    .outline()
+                    .small()
+                    .label("Show All Images")
+                    .on_click(
+                        cx.listener(|grid, _, _, cx| grid.set_filter(ImageFilter::default(), cx)),
+                    ),
+            )
     }
 }
 
@@ -509,13 +713,18 @@ mod tests {
         paths: AppPaths,
     }
 
-    /// A scanned library of `count` small images.
+    /// A scanned library of `count` small landscape images.
     fn library(count: u8) -> Fixture {
+        library_of(&vec![(64, 40); count as usize])
+    }
+
+    /// A scanned library with one image of each `(width, height)`.
+    fn library_of(sizes: &[(u32, u32)]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("library");
         std::fs::create_dir(&root).unwrap();
-        for ix in 0..count {
-            RgbImage::from_pixel(64, 40, Rgb([ix * 30, 80, 120]))
+        for (ix, (width, height)) in sizes.iter().enumerate() {
+            RgbImage::from_pixel(*width, *height, Rgb([ix as u8 * 30, 80, 120]))
                 .save(root.join(format!("{ix}.png")))
                 .unwrap();
         }
@@ -633,5 +842,49 @@ mod tests {
         cx.run_until_parked();
 
         assert!(favorites(&fixture).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_filters_by_orientation_and_favorites(cx: &mut TestAppContext) {
+        // Two landscape images and one portrait image.
+        let fixture = library_of(&[(64, 40), (40, 64), (64, 40)]);
+        let (window, grid) = open_grid(&fixture, cx);
+        let shown = |cx: &mut TestAppContext| cx.update(|cx| grid.read(cx).images().len());
+        let click = |id: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click(id, cx);
+            })
+            .unwrap();
+        };
+        assert_eq!(shown(cx), 3);
+
+        click("Portrait", cx);
+        assert_eq!(shown(cx), 1);
+        let portrait = cx.update(|cx| grid.read(cx).images()[0].clone());
+        assert_eq!((portrait.width(), portrait.height()), (40, 64));
+
+        // No square images: the empty state offers a way back.
+        click("Square", cx);
+        assert_eq!(shown(cx), 0);
+        click("show-all", cx);
+        assert_eq!(shown(cx), 3);
+
+        click("favorites-only", cx);
+        assert_eq!(shown(cx), 0);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("show-all").visible());
+        })
+        .unwrap();
+
+        // Favoriting an image shows it under the Favorites filter.
+        let path = portrait.path().to_path_buf();
+        cx.update(|cx| {
+            grid.update(cx, |grid, cx| grid.set_favorite_shown(&path, true, cx));
+        });
+        assert_eq!(shown(cx), 1);
+        click("favorites-only", cx);
+        assert_eq!(shown(cx), 3);
     }
 }

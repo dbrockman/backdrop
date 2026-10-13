@@ -10,7 +10,8 @@ use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use imagesize::{ImageError, ImageType};
+use image::metadata::Orientation;
+use image::{ImageDecoder as _, ImageError, ImageReader};
 use walkdir::WalkDir;
 
 use crate::image::{ImageFile, ImageFormat};
@@ -154,24 +155,41 @@ enum ProbeError {
     Invalid(&'static str),
 }
 
-/// Reads the format and dimensions from the file header.
+const UNSUPPORTED: &str = "not a JPEG, PNG, or WebP image";
+
+/// Reads the format and the upright dimensions from the file header: an image
+/// whose EXIF orientation rotates it a quarter turn has its width and height
+/// swapped, so orientation filters match what the user sees.
 fn probe(path: &Path) -> Result<(ImageFormat, u32, u32), ProbeError> {
-    let mut reader = BufReader::new(File::open(path).map_err(ProbeError::Io)?);
-    let image_type = imagesize::reader_type(&mut reader).map_err(probe_error)?;
-    let format = match image_type {
-        ImageType::Jpeg => ImageFormat::Jpeg,
-        ImageType::Png => ImageFormat::Png,
-        ImageType::Webp => ImageFormat::Webp,
-        _ => return Err(ProbeError::Invalid("not a JPEG, PNG, or WebP image")),
+    let file = File::open(path).map_err(ProbeError::Io)?;
+    let reader = ImageReader::new(BufReader::new(file))
+        .with_guessed_format()
+        .map_err(ProbeError::Io)?;
+    let format = match reader.format() {
+        Some(image::ImageFormat::Jpeg) => ImageFormat::Jpeg,
+        Some(image::ImageFormat::Png) => ImageFormat::Png,
+        Some(image::ImageFormat::WebP) => ImageFormat::Webp,
+        _ => return Err(ProbeError::Invalid(UNSUPPORTED)),
     };
-    let size = image_type.reader_size(&mut reader).map_err(probe_error)?;
-    let (Ok(width), Ok(height)) = (u32::try_from(size.width), u32::try_from(size.height)) else {
-        return Err(ProbeError::Invalid("image dimensions are too large"));
-    };
+    let mut decoder = reader.into_decoder().map_err(probe_error)?;
+    let (width, height) = decoder.dimensions();
     if width == 0 || height == 0 {
         return Err(ProbeError::Invalid("image has no pixels"));
     }
-    Ok((format, width, height))
+    // A missing or unreadable orientation means the image is stored upright.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let quarter_turn = matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    );
+    Ok(if quarter_turn {
+        (format, height, width)
+    } else {
+        (format, width, height)
+    })
 }
 
 fn probe_error(error: ImageError) -> ProbeError {
@@ -179,10 +197,8 @@ fn probe_error(error: ImageError) -> ProbeError {
         ImageError::IoError(cause) if cause.kind() != io::ErrorKind::UnexpectedEof => {
             ProbeError::Io(cause)
         }
-        ImageError::IoError(_) | ImageError::CorruptedImage => {
-            ProbeError::Invalid("the image file is damaged or incomplete")
-        }
-        ImageError::NotSupported => ProbeError::Invalid("not a JPEG, PNG, or WebP image"),
+        ImageError::Unsupported(_) => ProbeError::Invalid(UNSUPPORTED),
+        _ => ProbeError::Invalid("the image file is damaged or incomplete"),
     }
 }
 

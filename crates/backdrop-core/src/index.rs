@@ -18,9 +18,10 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use crate::discovery::{self, DiscoveryError, FileStamp, ScanIssue};
 use crate::fs_util;
 use crate::image::{ImageFile, ImageFormat};
+use crate::query::ImageOrder;
 
 /// Bump when the schema changes; existing databases are then rebuilt.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS meta (
@@ -60,31 +61,6 @@ pub enum IndexError {
 impl From<rusqlite::Error> for IndexError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Database(error)
-    }
-}
-
-/// How [`Index::images`] orders its results.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ImageOrder {
-    /// Most recently added first.
-    #[default]
-    Added,
-    /// Most recently modified first.
-    Modified,
-    /// By path, A to Z.
-    Path,
-    /// Most pixels first.
-    Resolution,
-}
-
-impl ImageOrder {
-    fn sql(self) -> &'static str {
-        match self {
-            Self::Added => "added DESC, path",
-            Self::Modified => "modified DESC, path",
-            Self::Path => "path",
-            Self::Resolution => "width * height DESC, path",
-        }
     }
 }
 
@@ -249,12 +225,12 @@ impl Index {
     }
 
     /// All indexed images.
+    /// All indexed images, in `order`.
     pub fn images(&self, order: ImageOrder) -> Result<Vec<ImageFile>, IndexError> {
-        let mut statement = self.connection.prepare(&format!(
-            "SELECT path, size, modified, added, width, height, format FROM images ORDER BY {}",
-            order.sql()
-        ))?;
-        let images = statement
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, size, modified, added, width, height, format FROM images")?;
+        let mut images = statement
             .query_map([], |row| {
                 let path: Vec<u8> = row.get(0)?;
                 let size: i64 = row.get(1)?;
@@ -270,7 +246,8 @@ impl Index {
                     ImageFormat::from_name(&format).expect("valid format in index"),
                 ))
             })?
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        order.sort(&mut images);
         Ok(images)
     }
 
@@ -376,22 +353,10 @@ mod tests {
 
     use super::*;
 
-    /// The start of a PNG file: enough for its dimensions to be read.
-    fn png(width: u32, height: u32) -> Vec<u8> {
-        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
-        bytes.extend(width.to_be_bytes());
-        bytes.extend(height.to_be_bytes());
-        bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
-        bytes
-    }
+    use crate::test_images::{jpeg, rotated_jpeg};
 
-    /// The start of a baseline JPEG file, up to its frame header.
-    fn jpeg(width: u16, height: u16) -> Vec<u8> {
-        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
-        bytes.extend(height.to_be_bytes());
-        bytes.extend(width.to_be_bytes());
-        bytes.extend([0x03; 10]);
-        bytes
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        crate::test_images::png(width, height, 0)
     }
 
     fn write(root: &Path, path: &str, contents: &[u8]) {
@@ -412,8 +377,8 @@ mod tests {
     #[test]
     fn finds_images_recursively() {
         let library = tempfile::tempdir().unwrap();
-        write(library.path(), "a.png", &png(1920, 1080));
-        write(library.path(), "dark/b.JPG", &jpeg(1080, 1920));
+        write(library.path(), "a.png", &png(192, 108));
+        write(library.path(), "dark/b.JPG", &jpeg(108, 192));
         write(library.path(), "notes.txt", b"not an image");
         let mut index = Index::in_memory().unwrap();
 
@@ -422,10 +387,24 @@ mod tests {
         let images = index.images(ImageOrder::Path).unwrap();
         assert_eq!(images[0].path(), Path::new("a.png"));
         assert_eq!(images[0].format(), ImageFormat::Png);
-        assert_eq!((images[0].width(), images[0].height()), (1920, 1080));
+        assert_eq!((images[0].width(), images[0].height()), (192, 108));
         assert_eq!(images[1].path(), Path::new("dark/b.JPG"));
         assert_eq!(images[1].format(), ImageFormat::Jpeg);
-        assert_eq!((images[1].width(), images[1].height()), (1080, 1920));
+        assert_eq!((images[1].width(), images[1].height()), (108, 192));
+    }
+
+    #[test]
+    fn rotated_photos_are_indexed_upright() {
+        let library = tempfile::tempdir().unwrap();
+        // Stored landscape, shown portrait.
+        write(library.path(), "photo.jpg", &rotated_jpeg(64, 48));
+        let mut index = Index::in_memory().unwrap();
+
+        index.scan(library.path()).unwrap();
+
+        let photo = &index.images(ImageOrder::Path).unwrap()[0];
+        assert_eq!((photo.width(), photo.height()), (48, 64));
+        assert_eq!(photo.orientation(), crate::image::Orientation::Portrait);
     }
 
     #[test]
@@ -482,7 +461,7 @@ mod tests {
     fn invalid_images_are_reported_and_not_indexed() {
         let library = tempfile::tempdir().unwrap();
         write(library.path(), "text.jpg", b"not really a jpeg");
-        write(library.path(), "truncated.png", &png(10, 10)[..12]);
+        write(library.path(), "truncated.png", &png(10, 10)[..30]);
         let mut index = Index::in_memory().unwrap();
 
         let summary = index.scan(library.path()).unwrap();
@@ -531,8 +510,8 @@ mod tests {
     fn orders_images() {
         let library = tempfile::tempdir().unwrap();
         write(library.path(), "small.png", &png(100, 100));
-        write(library.path(), "large.png", &png(4000, 3000));
-        write(library.path(), "medium.png", &png(1000, 1000));
+        write(library.path(), "large.png", &png(400, 300));
+        write(library.path(), "medium.png", &png(200, 200));
         let mut index = Index::in_memory().unwrap();
         index.scan(library.path()).unwrap();
 

@@ -1,11 +1,13 @@
 //! Command-line interface. Commands run without starting GPUI.
 
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use backdrop_core::index::ImageOrder;
+use backdrop_core::image::Orientation;
 use backdrop_core::library::{Library, LibraryScan};
 use backdrop_core::paths::AppPaths;
+use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::settings::{LibraryStatus, Settings};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -28,6 +30,9 @@ pub enum Command {
         /// Order of the images.
         #[arg(long, value_enum, default_value_t = Sort::Added)]
         sort: Sort,
+        /// Only list images with this orientation.
+        #[arg(long, value_enum)]
+        orientation: Option<OrientationArg>,
         /// Only list favorites.
         #[arg(long)]
         favorites: bool,
@@ -69,10 +74,29 @@ pub enum Sort {
     Added,
     /// Most recently modified first.
     Modified,
+    /// By file name, A to Z.
+    Name,
     /// By path, A to Z.
     Path,
     /// Most pixels first.
     Resolution,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum OrientationArg {
+    Landscape,
+    Portrait,
+    Square,
+}
+
+impl From<OrientationArg> for Orientation {
+    fn from(orientation: OrientationArg) -> Self {
+        match orientation {
+            OrientationArg::Landscape => Self::Landscape,
+            OrientationArg::Portrait => Self::Portrait,
+            OrientationArg::Square => Self::Square,
+        }
+    }
 }
 
 impl From<Sort> for ImageOrder {
@@ -80,6 +104,7 @@ impl From<Sort> for ImageOrder {
         match sort {
             Sort::Added => Self::Added,
             Sort::Modified => Self::Modified,
+            Sort::Name => Self::Name,
             Sort::Path => Self::Path,
             Sort::Resolution => Self::Resolution,
         }
@@ -90,7 +115,16 @@ pub fn run(command: Command) -> anyhow::Result<()> {
     let paths = AppPaths::from_env()?;
     match command {
         Command::Gui => unreachable!("the GUI is started by main"),
-        Command::List { sort, favorites } => list(&paths, sort.into(), favorites),
+        Command::List {
+            sort,
+            orientation,
+            favorites,
+        } => {
+            let filter = ImageFilter::default()
+                .with_orientation(orientation.map(Into::into))
+                .with_favorites_only(favorites);
+            list(&paths, sort.into(), &filter)
+        }
         Command::Favorite { images } => set_favorite(&paths, &images, true),
         Command::Unfavorite { images } => set_favorite(&paths, &images, false),
         Command::Scan { remove_missing } => scan_command(&paths, remove_missing),
@@ -107,21 +141,22 @@ pub fn run(command: Command) -> anyhow::Result<()> {
 
 /// Scans first, so the list is never stale. Scanning an unchanged library only
 /// checks file sizes and modification times.
-fn list(paths: &AppPaths, order: ImageOrder, favorites_only: bool) -> anyhow::Result<()> {
+fn list(paths: &AppPaths, order: ImageOrder, filter: &ImageFilter) -> anyhow::Result<()> {
     let (library, _) = scan(paths)?;
-    let favorites = if favorites_only {
-        Some(library.favorites()?)
-    } else {
-        None
-    };
+    let favorites = library.favorites()?;
+    let mut out = io::stdout().lock();
     for image in library.images(order)? {
-        if favorites
-            .as_ref()
-            .is_some_and(|favorites| !favorites.contains(image.path()))
-        {
+        if !filter.matches(&image, &favorites) {
             continue;
         }
-        println!("{}", library.root().join(image.path()).display());
+        let line = writeln!(out, "{}", library.root().join(image.path()).display());
+        // The reader stopped early, as `backdrop list | head` does.
+        if let Err(error) = line {
+            return match error.kind() {
+                io::ErrorKind::BrokenPipe => Ok(()),
+                _ => Err(error.into()),
+            };
+        }
     }
     Ok(())
 }
@@ -254,6 +289,7 @@ mod tests {
             args.command,
             Some(Command::List {
                 sort: Sort::Added,
+                orientation: None,
                 favorites: false
             })
         ));

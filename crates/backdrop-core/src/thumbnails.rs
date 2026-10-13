@@ -125,7 +125,8 @@ mod tests {
     use image::{ImageBuffer, Rgb};
 
     use super::*;
-    use crate::index::{ImageOrder, Index};
+    use crate::index::Index;
+    use crate::query::ImageOrder;
 
     #[test]
     fn cover_size_fills_the_tile_without_enlarging() {
@@ -185,12 +186,9 @@ mod tests {
     fn undecodable_images_are_an_error() {
         let library = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        // A valid PNG header with no image data.
-        let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
-        header.extend(16u32.to_be_bytes());
-        header.extend(16u32.to_be_bytes());
-        header.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
-        fs::write(library.path().join("broken.png"), header).unwrap();
+        // A complete header, so the image is indexed, but cut-off pixel data.
+        let png = crate::test_images::png(64, 64, 1);
+        fs::write(library.path().join("broken.png"), &png[..png.len() - 40]).unwrap();
         let mut index = Index::in_memory().unwrap();
         index.scan(library.path()).unwrap();
         let image = index.images(ImageOrder::Path).unwrap().remove(0);

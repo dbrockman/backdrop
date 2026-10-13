@@ -17,8 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::image::ImageFile;
-use crate::index::{ImageOrder, Index, IndexError, ScanSummary};
+use crate::index::{Index, IndexError, ScanSummary};
 use crate::metadata::{self, ImageMetadata, LibraryMetadata, MetadataError};
+use crate::query::ImageOrder;
 
 /// Removals above both limits in one scan need confirmation.
 const CONFIRM_REMOVALS_FROM_COUNT: usize = 20;
@@ -361,13 +362,7 @@ fn remove_orphaned_snapshots(root: &Path, metadata: &LibraryMetadata, removed: &
 mod tests {
     use super::*;
 
-    fn png(width: u32, height: u32, seed: u8) -> Vec<u8> {
-        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
-        bytes.extend(width.to_be_bytes());
-        bytes.extend(height.to_be_bytes());
-        bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, seed]);
-        bytes
-    }
+    use crate::test_images::png;
 
     struct Fixture {
         dir: tempfile::TempDir,
