@@ -398,10 +398,18 @@ Provider cache data that can be re-fetched, thumbnails, transient UI state, and 
 
 Users may rename, move, and delete images outside Backdrop. Each scan reconciles `metadata.toml` with the filesystem:
 
-1. Walk the library and hash new or changed files. Unchanged files reuse the hash cached in the index, keyed by path, size, and modification time.
-2. **Path exists:** the record stays. If the hash changed, the file was edited in place; the metadata stays with the path and the hash is updated.
+1. Walk the library. Changes are detected by size and modification time, compared with the index; this never reads file contents.
+2. **Path exists:** the record stays. If the file changed, it was edited in place; the metadata stays with the path and the hash is updated.
 3. **Path missing, same hash at an untracked path:** the image was renamed or moved, and the record moves to the new path. If several untracked copies match, the first by path is chosen.
 4. **Path missing, no match:** the image was deleted. Its record is removed, and so is its provider snapshot if no other record refers to it.
+
+A content hash only identifies an image after a rename or move, so files are hashed only when a hash will be used:
+
+- when metadata is first saved for an image;
+- when a file that has a record changes in place;
+- when a record's file is missing: only untracked files with the same size the missing file had (from the index) are hashed as candidates. If the index has no size for it, for example after a rebuild, every untracked file is a candidate.
+
+Images without metadata are never read beyond their headers. Computed hashes are cached in the index, keyed by path, size, and modification time, so no file is hashed twice.
 
 All matching completes before anything is removed, so a move is never treated as a deletion.
 
