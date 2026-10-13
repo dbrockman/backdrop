@@ -20,6 +20,7 @@ use backdrop_core::image::Orientation;
 use backdrop_core::library::{Downloaded, Library};
 use backdrop_core::providers::{ContentRating, Provider, RemoteWallpaper, SearchQuery, SearchSort};
 use backdrop_core::remote_images::RemoteThumbnails;
+use backdrop_core::settings::Settings;
 use gpui_kit::component::button::{
     Button, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
 };
@@ -134,6 +135,14 @@ pub struct WallhavenBrowser {
     query: SearchQuery,
     /// Results of every page loaded so far, without duplicates.
     wallpapers: Arc<Vec<RemoteWallpaper>>,
+    /// The results shown: `wallpapers` without those hidden for being in the
+    /// library. Selection, keyboard movement, and rows all use this.
+    visible: Arc<Vec<RemoteWallpaper>>,
+    /// Leave out wallpapers the library already has; saved in the settings.
+    hide_in_library: bool,
+    /// Wallpapers downloaded since the search started. They stay visible
+    /// when hiding, so a download doesn't make its wallpaper vanish.
+    downloaded: HashSet<String>,
     page: u32,
     last_page: u32,
     total: u64,
@@ -170,6 +179,7 @@ impl WallhavenBrowser {
         library: Option<LibraryLocation>,
         thumbnails_dir: PathBuf,
         settings_file: PathBuf,
+        hide_in_library: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -193,6 +203,9 @@ impl WallhavenBrowser {
             query_input,
             query: SearchQuery::default(),
             wallpapers: Arc::new(Vec::new()),
+            visible: Arc::new(Vec::new()),
+            hide_in_library,
+            downloaded: HashSet::new(),
             page: 0,
             last_page: 0,
             total: 0,
@@ -224,8 +237,9 @@ impl WallhavenBrowser {
     }
 
     #[cfg(test)]
-    pub fn wallpapers(&self) -> &[RemoteWallpaper] {
-        &self.wallpapers
+    /// The results shown, without hidden ones.
+    pub fn visible_wallpapers(&self) -> &[RemoteWallpaper] {
+        &self.visible
     }
 
     pub fn is_in_library(&self, id: &str) -> bool {
@@ -267,6 +281,7 @@ impl WallhavenBrowser {
     pub fn refresh_library(&mut self, cx: &mut Context<Self>) {
         let Some(library) = self.library.clone() else {
             self.in_library.clear();
+            self.update_visible(cx);
             self._library_task = None;
             return;
         };
@@ -294,6 +309,7 @@ impl WallhavenBrowser {
             };
             this.update(cx, |browser, cx| {
                 browser.in_library = ids;
+                browser.update_visible(cx);
                 cx.notify();
             })
             .ok();
@@ -306,6 +322,8 @@ impl WallhavenBrowser {
         self.query.page = 1;
         self.query.seed = None;
         self.wallpapers = Arc::new(Vec::new());
+        self.visible = Arc::new(Vec::new());
+        self.downloaded.clear();
         self.page = 0;
         self.last_page = 0;
         self.total = 0;
@@ -359,12 +377,12 @@ impl WallhavenBrowser {
                                 .filter(|wallpaper| !known.contains(wallpaper.id())),
                         );
                         browser.wallpapers = Arc::new(wallpapers);
+                        browser.update_visible(cx);
                         browser.page = page.page;
                         browser.last_page = page.last_page;
                         browser.total = page.total;
                         browser.query.seed = page.seed;
                         browser.status = Status::Ready;
-                        browser.load_thumbnails(cx);
                     }
                     Err(error) => browser.status = Status::Failed(error.to_string().into()),
                 }
@@ -374,11 +392,69 @@ impl WallhavenBrowser {
         }));
     }
 
+    /// Recomputes the shown results. The selection is kept by id; while its
+    /// wallpaper is hidden, nothing is selected.
+    fn update_visible(&mut self, cx: &mut Context<Self>) {
+        let visible = self
+            .wallpapers
+            .iter()
+            .filter(|wallpaper| !self.is_hidden(wallpaper.id()))
+            .cloned()
+            .collect();
+        self.visible = Arc::new(visible);
+        self.load_thumbnails(cx);
+        cx.notify();
+    }
+
+    fn is_hidden(&self, id: &str) -> bool {
+        self.hide_in_library && self.in_library.contains(id) && !self.downloaded.contains(id)
+    }
+
+    /// Loaded results left out for being in the library.
+    fn hidden_count(&self) -> usize {
+        self.wallpapers.len() - self.visible.len()
+    }
+
+    /// Hides or shows wallpapers the library has, and saves the choice.
+    fn set_hide_in_library(&mut self, hide: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hide_in_library == hide {
+            return;
+        }
+        self.hide_in_library = hide;
+        self.update_visible(cx);
+        let settings_file = self.settings_file.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let saved = cx
+                .background_spawn(async move {
+                    Settings::update(&settings_file, |settings| {
+                        settings.set_wallhaven_hide_in_library(hide);
+                        Ok(())
+                    })
+                })
+                .await;
+            if let Err(error) = saved {
+                cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::error(error.to_string()).title("Couldn’t save the setting"),
+                        cx,
+                    )
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(test)]
+    pub fn is_hiding_in_library(&self) -> bool {
+        self.hide_in_library
+    }
+
     /// Downloads missing thumbnails in display order, a batch at a time, and
     /// shows each batch as it completes.
     fn load_thumbnails(&mut self, cx: &mut Context<Self>) {
         let missing: Vec<RemoteWallpaper> = self
-            .wallpapers
+            .visible
             .iter()
             .filter(|wallpaper| !self.thumbnails.contains_key(wallpaper.id()))
             .cloned()
@@ -422,40 +498,38 @@ impl WallhavenBrowser {
 
     pub fn selected_ix(&self) -> Option<usize> {
         let selected = self.selected.as_deref()?;
-        self.wallpapers
+        self.visible
             .iter()
             .position(|wallpaper| wallpaper.id() == selected)
     }
 
     pub fn selected_wallpaper(&self) -> Option<&RemoteWallpaper> {
-        self.wallpapers.get(self.selected_ix()?)
+        self.visible.get(self.selected_ix()?)
     }
 
     /// Selects the wallpaper at `ix` and scrolls it into view. Reaching the
     /// last row loads the next page, so the keyboard never runs out of
     /// results while there are more.
     pub fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(wallpaper) = self.wallpapers.get(ix) else {
+        let Some(wallpaper) = self.visible.get(ix) else {
             return;
         };
         self.selected = Some(wallpaper.id().to_owned());
         let row = ix / self.columns;
         self.scroll_handle
             .scroll_to_item(row, ScrollStrategy::Nearest);
-        if row + 1 >= self.wallpapers.len().div_ceil(self.columns) {
+        if row + 1 >= self.visible.len().div_ceil(self.columns) {
             self.load_more(cx);
         }
         cx.notify();
     }
 
     pub fn move_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
-        if self.wallpapers.is_empty() {
+        if self.visible.is_empty() {
             return;
         }
         let ix = match self.selected_ix() {
-            Some(ix) => ix
-                .saturating_add_signed(offset)
-                .min(self.wallpapers.len() - 1),
+            Some(ix) => ix.saturating_add_signed(offset).min(self.visible.len() - 1),
             None => 0,
         };
         self.select(ix, cx);
@@ -601,7 +675,9 @@ impl WallhavenBrowser {
                 browser.downloads.remove(&id);
                 match result {
                     Ok(Downloaded::Saved(_) | Downloaded::AlreadyInLibrary(_)) => {
+                        browser.downloaded.insert(id.clone());
                         browser.in_library.insert(id);
+                        browser.update_visible(cx);
                         cx.emit(LibraryChanged);
                     }
                     Err(error) => window.push_notification(
@@ -671,7 +747,7 @@ impl Render for WallhavenBrowser {
             }))
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.select(0, cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| {
-                let last = this.wallpapers.len().saturating_sub(1);
+                let last = this.visible.len().saturating_sub(1);
                 this.select(last, cx)
             }))
             .on_action(
@@ -732,6 +808,11 @@ impl WallhavenBrowser {
             )),
             _ => None,
         };
+        // Hiding is visible state: say how many loaded results it left out.
+        let count = count.map(|count| match self.hidden_count() {
+            0 => count,
+            hidden => format!("{count} · {} hidden", format::grouped(hidden)),
+        });
 
         h_flex()
             .flex_none()
@@ -774,6 +855,17 @@ impl WallhavenBrowser {
                     })),
             )
             .child(ratings)
+            .child(
+                Toggle::new("hide-in-library")
+                    .outline()
+                    .small()
+                    .label("Hide In Library")
+                    .checked(self.hide_in_library)
+                    .tooltip("Leave out wallpapers the library already has")
+                    .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                        this.set_hide_in_library(*checked, window, cx)
+                    })),
+            )
             .child(div().flex_1())
             .when_some(count, |toolbar, count| {
                 toolbar.child(
@@ -887,7 +979,11 @@ impl WallhavenBrowser {
             };
         }
 
-        let rows = self.wallpapers.len().div_ceil(self.columns);
+        if self.visible.is_empty() {
+            return self.render_all_hidden(cx);
+        }
+
+        let rows = self.visible.len().div_ceil(self.columns);
         div()
             .size_full()
             .child(
@@ -917,18 +1013,53 @@ impl WallhavenBrowser {
             .into_any_element()
     }
 
+    /// Every loaded result is in the library and hidden.
+    fn render_all_hidden(&self, cx: &mut Context<Self>) -> AnyElement {
+        let loading = matches!(self.status, Status::LoadingMore);
+        centered()
+            .gap_3()
+            .child(format!(
+                "The library already has all {} loaded",
+                format::count(self.wallpapers.len(), "wallpaper", "wallpapers")
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .when(self.has_more_pages() || loading, |row| {
+                        row.child(
+                            Button::new("load-more-hidden")
+                                .outline()
+                                .small()
+                                .label("Load More")
+                                .loading(loading)
+                                .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("show-in-library")
+                            .outline()
+                            .small()
+                            .label("Show Them")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_hide_in_library(false, window, cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_row(&self, row: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rem = window.rem_size();
         let columns = self.columns;
         let tile = tiles::tile_size(self.width, columns, rem);
-        let start = (row * columns).min(self.wallpapers.len());
-        let end = (start + columns).min(self.wallpapers.len());
+        let start = (row * columns).min(self.visible.len());
+        let end = (start + columns).min(self.visible.len());
         h_flex()
             .px(rem * PADDING)
             .pb(rem * GAP)
             .gap(rem * GAP)
             .children(
-                self.wallpapers[start..end]
+                self.visible[start..end]
                     .iter()
                     .enumerate()
                     .map(|(column, wallpaper)| {
@@ -1158,12 +1289,13 @@ mod tests {
         existing: &[&str],
         cx: &mut TestAppContext,
     ) -> Fixture {
-        open_browser_with(FakeProvider::new(pages), existing, cx)
+        open_browser_with(FakeProvider::new(pages), existing, false, cx)
     }
 
     fn open_browser_with(
         provider: FakeProvider,
         existing: &[&str],
+        hide_in_library: bool,
         cx: &mut TestAppContext,
     ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
@@ -1203,6 +1335,7 @@ mod tests {
                     Some(location),
                     paths.remote_thumbnails_dir(),
                     paths.settings_file(),
+                    hide_in_library,
                     window,
                     cx,
                 )
@@ -1240,7 +1373,7 @@ mod tests {
             fixture
                 .browser
                 .read(cx)
-                .wallpapers()
+                .visible_wallpapers()
                 .iter()
                 .map(|wallpaper| wallpaper.id().to_owned())
                 .collect()
@@ -1368,7 +1501,7 @@ mod tests {
     #[gpui_kit::test]
     fn a_rejected_api_key_stays_in_the_dialog(cx: &mut TestAppContext) {
         let provider = FakeProvider::new(vec![vec!["aaa111"]]).rejecting("wrong");
-        let fixture = open_browser_with(provider, &[], cx);
+        let fixture = open_browser_with(provider, &[], false, cx);
 
         enter_api_key(&fixture, "wrong", cx);
         cx.update_window(fixture.window, |_, window, cx| {
@@ -1482,5 +1615,62 @@ mod tests {
 
         assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
         assert_eq!(fixture.provider.searches().len(), 1);
+    }
+    fn saved_hiding(fixture: &Fixture) -> bool {
+        Settings::load(&fixture.settings_file)
+            .unwrap()
+            .wallhaven_hide_in_library()
+    }
+
+    #[gpui_kit::test]
+    fn hiding_leaves_out_wallpapers_in_the_library_and_is_saved(cx: &mut TestAppContext) {
+        let pages = vec![vec!["aaa111", "bbb222", "ccc333"]];
+        let fixture = open_browser(pages, &["fake-aaa111.png"], cx);
+        assert_eq!(ids(&fixture, cx), ["aaa111", "bbb222", "ccc333"]);
+
+        click(&fixture, "hide-in-library", cx);
+        assert_eq!(ids(&fixture, cx), ["bbb222", "ccc333"]);
+        assert!(saved_hiding(&fixture));
+
+        click(&fixture, "hide-in-library", cx);
+        assert_eq!(ids(&fixture, cx), ["aaa111", "bbb222", "ccc333"]);
+        assert!(!saved_hiding(&fixture));
+    }
+
+    #[gpui_kit::test]
+    fn the_saved_choice_hides_from_the_start(cx: &mut TestAppContext) {
+        let provider = FakeProvider::new(vec![vec!["aaa111", "bbb222"]]);
+        let fixture = open_browser_with(provider, &["fake-aaa111.png"], true, cx);
+
+        assert!(cx.update(|cx| fixture.browser.read(cx).is_hiding_in_library()));
+        assert_eq!(ids(&fixture, cx), ["bbb222"]);
+    }
+
+    #[gpui_kit::test]
+    fn a_wallpaper_downloaded_while_hiding_stays_until_the_next_search(cx: &mut TestAppContext) {
+        let provider = FakeProvider::new(vec![vec!["aaa111", "bbb222"]]);
+        let fixture = open_browser_with(provider, &[], true, cx);
+
+        press(&fixture, "right", cx);
+        press(&fixture, "d", cx);
+        cx.update(|cx| assert!(fixture.browser.read(cx).is_in_library("aaa111")));
+        assert_eq!(ids(&fixture, cx), ["aaa111", "bbb222"]);
+
+        // A new search hides it like any other wallpaper in the library.
+        press(&fixture, "ctrl-f", cx);
+        press(&fixture, "enter", cx);
+        assert_eq!(ids(&fixture, cx), ["bbb222"]);
+    }
+
+    #[gpui_kit::test]
+    fn when_everything_loaded_is_hidden_it_can_be_shown(cx: &mut TestAppContext) {
+        let provider = FakeProvider::new(vec![vec!["aaa111"]]);
+        let fixture = open_browser_with(provider, &["fake-aaa111.png"], true, cx);
+        assert!(ids(&fixture, cx).is_empty());
+
+        click(&fixture, "show-in-library", cx);
+
+        assert_eq!(ids(&fixture, cx), ["aaa111"]);
+        assert!(!saved_hiding(&fixture));
     }
 }

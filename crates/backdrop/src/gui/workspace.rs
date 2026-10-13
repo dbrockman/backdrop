@@ -73,6 +73,9 @@ pub struct Workspace {
     page: Page,
     /// Where Wallhaven wallpapers come from; a fake one in tests.
     provider: Arc<dyn Provider>,
+    /// The saved choice to hide Wallhaven results the library has, from the
+    /// settings read at startup.
+    hide_in_library: bool,
     /// Created the first time the Wallhaven page is shown, so nothing is
     /// requested from Wallhaven until then.
     wallhaven: Option<Entity<WallhavenBrowser>>,
@@ -132,6 +135,7 @@ impl Workspace {
                 Ok(settings) => {
                     let key = settings.wallhaven_api_key().map(str::to_owned);
                     this.provider.set_api_key(key);
+                    this.hide_in_library = settings.wallhaven_hide_in_library();
                     this.set_library_status(settings.library_status(), window, cx)
                 }
                 Err(error) => {
@@ -156,6 +160,7 @@ impl Workspace {
             desktop: None,
             page: Page::Library,
             provider,
+            hide_in_library: false,
             wallhaven: None,
             _wallhaven_subscriptions: Vec::new(),
             wallhaven_detail: None,
@@ -244,12 +249,14 @@ impl Workspace {
         let location = self.library_location();
         let thumbnails_dir = self.paths.remote_thumbnails_dir();
         let settings_file = self.paths.settings_file();
+        let hide_in_library = self.hide_in_library;
         let browser = cx.new(|cx| {
             WallhavenBrowser::new(
                 provider,
                 location,
                 thumbnails_dir,
                 settings_file,
+                hide_in_library,
                 window,
                 cx,
             )

@@ -235,7 +235,7 @@ Potential behavior, configurable later:
 - Hide downloaded images entirely
 - Filter to show downloaded or not-downloaded images
 
-The default behavior remains undecided.
+**Decided:** already-downloaded wallpapers show an "In library" badge by default, and a toggle on the browsing toolbar hides them. The toggle is saved in Backdrop's settings. While hiding, a wallpaper downloaded during the current search stays visible until the next search, so a download never makes its wallpaper vanish.
 
 ### 3.5 Download management
 
@@ -714,7 +714,7 @@ The goal is a useful offline wallpaper browser.
 - [x] API-key configuration
 - [x] SFW/NSFW filtering
 - [x] Download original images
-- [ ] Detect already-downloaded images
+- [x] Detect already-downloaded images
 - [x] Download destination rules
 
 ### Phase 3 — Organization and Git
@@ -748,7 +748,6 @@ These questions can be resolved during implementation.
 
 | Topic | Question |
 |---|---|
-| Downloaded indicators | Highlight, dim, hide, or provide a toggle? |
 | Content ratings | Should filtering apply to local images as well as online browsing? |
 | Multi-monitor | How should images be highlighted if different monitors use different wallpapers? |
 | Tag filtering | Should matching default to AND or OR? |

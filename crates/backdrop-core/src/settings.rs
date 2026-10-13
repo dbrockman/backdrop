@@ -54,6 +54,9 @@ struct ProviderSettings {
 struct WallhavenSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<Secret>,
+    /// Leave wallpapers the library already has out of the results.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    hide_in_library: bool,
 }
 
 /// A credential, left out of `Debug` output so it doesn't end up in logs.
@@ -151,6 +154,15 @@ impl Settings {
             .map(str::trim)
             .filter(|key| !key.is_empty())
             .map(|key| Secret(key.to_owned()));
+    }
+
+    /// Whether Wallhaven results leave out wallpapers the library has.
+    pub fn wallhaven_hide_in_library(&self) -> bool {
+        self.providers.wallhaven.hide_in_library
+    }
+
+    pub fn set_wallhaven_hide_in_library(&mut self, hide: bool) {
+        self.providers.wallhaven.hide_in_library = hide;
     }
 
     /// Checks the configured library folder against the filesystem.
@@ -291,6 +303,23 @@ mod tests {
 
         assert_eq!(settings.wallhaven_api_key(), None);
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn hiding_wallpapers_in_the_library_is_remembered() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("settings.toml");
+        assert!(!Settings::load(&file).unwrap().wallhaven_hide_in_library());
+
+        Settings::update(&file, |s| {
+            s.set_wallhaven_hide_in_library(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(Settings::load(&file).unwrap().wallhaven_hide_in_library());
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("hide_in_library = true"), "{text}");
     }
 
     #[test]
