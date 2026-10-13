@@ -1,6 +1,5 @@
 //! Graphical interface. Presentation only; behavior comes from `backdrop_core`.
 
-mod format;
 mod image_cache;
 mod image_detail;
 mod library_grid;

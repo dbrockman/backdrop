@@ -30,8 +30,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::format;
 use super::image_cache::LruImageCache;
+use crate::format;
 
 pub const KEY_CONTEXT: &str = "LibraryGrid";
 

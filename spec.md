@@ -597,19 +597,24 @@ The GUI and CLI both interact with this shared functionality.
 
 Backdrop should be usable through the command line without launching the graphical interface.
 
-Possible commands:
+Commands in the first release:
 
 ```bash
-backdrop
-backdrop list
+backdrop                          # open the GUI (also `backdrop gui`)
+backdrop list [--sort …] [--orientation …] [--favorites]
 backdrop info <image>
 backdrop set <image>
-backdrop set --random
-backdrop scan
-backdrop git status
+backdrop set --random [--orientation …] [--favorites]
+backdrop current
+backdrop scan [--remove-missing]
+backdrop delete <image>…
+backdrop favorite <image>…
+backdrop unfavorite <image>…
+backdrop library [set <dir>]
+backdrop paths
 ```
 
-Future commands could provide provider search, downloads, filtering, and metadata editing.
+Later phases add commands alongside their features, such as `backdrop git status` (Phase 3). Future commands could provide provider search, downloads, filtering, and metadata editing.
 
 CLI operations should use the same settings, database, and core logic as the GUI.
 
@@ -674,7 +679,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Highlight the current wallpaper
 - [x] Set wallpaper
 - [x] Delete images using system trash
-- [ ] Basic shared CLI functionality
+- [x] Basic shared CLI functionality
 
 ### Phase 2 — Wallhaven
 
@@ -727,7 +732,6 @@ These questions can be resolved during implementation.
 | Multi-monitor | How should images be highlighted if different monitors use different wallpapers? |
 | Tag filtering | Should matching default to AND or OR? |
 | Git integration | How should untracked and deleted images appear in the gallery? |
-| CLI | Which functionality should be available in the first release? |
 | Review workflow | Is a dedicated keep/discard mode more useful than ordinary batch deletion? |
 | Folder changes | How should changing the library root affect existing metadata and cache records? |
 

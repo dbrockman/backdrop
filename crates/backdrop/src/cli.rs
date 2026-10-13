@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::bail;
 use backdrop_core::desktop::WallpaperBackend;
-use backdrop_core::image::Orientation;
+use backdrop_core::image::{ImageFile, Orientation};
 use backdrop_core::library::{Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::settings::{LibraryStatus, Settings};
 use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::format;
 
 /// Browse, organize, download, and manage wallpapers.
 ///
@@ -38,6 +40,8 @@ pub enum Command {
         #[arg(long)]
         favorites: bool,
     },
+    /// Print the details of an image in the library.
+    Info { image: PathBuf },
     /// Move images to the trash and remove them from the library.
     Delete {
         #[arg(required = true)]
@@ -148,6 +152,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
                 .with_favorites_only(favorites);
             list(&paths, sort.into(), &filter)
         }
+        Command::Info { image } => info(&paths, &image),
         Command::Delete { images } => delete(&paths, &images),
         Command::Favorite { images } => set_favorite(&paths, &images, true),
         Command::Unfavorite { images } => set_favorite(&paths, &images, false),
@@ -206,19 +211,79 @@ fn list(paths: &AppPaths, order: ImageOrder, filter: &ImageFilter) -> anyhow::Re
     Ok(())
 }
 
+/// Prints the image's details, as the detail view shows them. Scans first, so
+/// a new or changed image is described correctly. Whether the image is the
+/// current wallpaper is printed only when a supported desktop shell is running.
+fn info(paths: &AppPaths, image: &Path) -> anyhow::Result<()> {
+    let (library, _) = scan(paths)?;
+    let images = library.images(ImageOrder::Path)?;
+    let image = find_image(&library, &images, image)?;
+    let favorite = library.favorites()?.contains(image.path());
+    let file = library.root().join(image.path());
+    let wallpaper = backdrop_core::desktop::detect().map(|desktop| {
+        desktop
+            .current_wallpaper()
+            .ok()
+            .flatten()
+            .is_some_and(|current| current == file)
+    });
+    print!("{}", describe(image, &file, favorite, wallpaper));
+    Ok(())
+}
+
+/// The lines `backdrop info` prints for `image`, whose absolute path is `file`.
+fn describe(image: &ImageFile, file: &Path, favorite: bool, wallpaper: Option<bool>) -> String {
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    let orientation = match image.orientation() {
+        Orientation::Landscape => "landscape",
+        Orientation::Portrait => "portrait",
+        Orientation::Square => "square",
+    };
+    let mut lines = vec![
+        ("path", file.display().to_string()),
+        (
+            "dimensions",
+            format!(
+                "{} ({}, {orientation})",
+                format::dimensions(image.width(), image.height()),
+                format::aspect_ratio(image.width(), image.height()),
+            ),
+        ),
+        ("format", format::image_format(image.format()).to_owned()),
+        ("file size", format::file_size(image.size())),
+        ("added", format::date_time(image.added())),
+        ("modified", format::date_time(image.modified())),
+        ("favorite", yes_no(favorite).to_owned()),
+    ];
+    if let Some(wallpaper) = wallpaper {
+        lines.push(("wallpaper", yes_no(wallpaper).to_owned()));
+    }
+    lines
+        .into_iter()
+        .map(|(label, value)| format!("{label:<12}{value}\n"))
+        .collect()
+}
+
+/// The indexed image at `image`, a path given on the command line.
+fn find_image<'a>(
+    library: &Library,
+    images: &'a [ImageFile],
+    image: &Path,
+) -> anyhow::Result<&'a ImageFile> {
+    let path = library.relative_path(image)?;
+    match images.iter().find(|indexed| indexed.path() == path) {
+        Some(indexed) => Ok(indexed),
+        None => bail!("{} is not an image in the library", image.display()),
+    }
+}
+
 /// Moves images to the trash. All paths are checked before any is moved.
 fn delete(paths: &AppPaths, images: &[PathBuf]) -> anyhow::Result<()> {
     let (mut library, _) = scan(paths)?;
     let indexed = library.images(ImageOrder::Path)?;
     let images = images
         .iter()
-        .map(|image| {
-            let path = library.relative_path(image)?;
-            if !indexed.iter().any(|indexed| indexed.path() == path) {
-                bail!("{} is not an image in the library", image.display());
-            }
-            Ok(path)
-        })
+        .map(|image| Ok(find_image(&library, &indexed, image)?.path().to_path_buf()))
         .collect::<anyhow::Result<Vec<_>>>()?;
     for image in images {
         library.delete_image(&image, &SystemTrash)?;
@@ -259,13 +324,7 @@ fn set_wallpaper(
     let (library, _) = scan(paths)?;
     let images = library.images(ImageOrder::Path)?;
     let path = match image {
-        Some(image) => {
-            let path = library.relative_path(image)?;
-            if !images.iter().any(|indexed| indexed.path() == path) {
-                bail!("{} is not an image in the library", image.display());
-            }
-            path
-        }
+        Some(image) => find_image(&library, &images, image)?.path().to_path_buf(),
         None => {
             let favorites = library.favorites()?;
             let current = desktop
@@ -405,6 +464,59 @@ mod tests {
         assert!(Args::try_parse_from(["backdrop", "set", "--random", "--favorites"]).is_ok());
         assert!(Args::try_parse_from(["backdrop", "set"]).is_err());
         assert!(Args::try_parse_from(["backdrop", "set", "a.jpg", "--random"]).is_err());
+    }
+
+    #[test]
+    fn info_takes_one_image() {
+        assert!(Args::try_parse_from(["backdrop", "info", "a.jpg"]).is_ok());
+        assert!(Args::try_parse_from(["backdrop", "info"]).is_err());
+        assert!(Args::try_parse_from(["backdrop", "info", "a.jpg", "b.jpg"]).is_err());
+    }
+
+    /// A scanned library holding `a.png`, 1920 × 1080, and the images in it.
+    fn library() -> (tempfile::TempDir, Library, Vec<ImageFile>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        std::fs::create_dir(&root).unwrap();
+        image::RgbImage::new(1920, 1080)
+            .save(root.join("a.png"))
+            .unwrap();
+        let mut library = Library::open(&root, &dir.path().join("index.sqlite")).unwrap();
+        library.scan().unwrap();
+        let images = library.images(ImageOrder::Path).unwrap();
+        (dir, library, images)
+    }
+
+    #[test]
+    fn find_image_accepts_only_indexed_images() {
+        let (_dir, library, images) = library();
+        let found = find_image(&library, &images, &library.root().join("a.png")).unwrap();
+        assert_eq!(found.path(), Path::new("a.png"));
+        let notes = library.root().join("notes.txt");
+        std::fs::write(&notes, "not an image").unwrap();
+        let error = find_image(&library, &images, &notes).unwrap_err();
+        assert!(error.to_string().contains("is not an image in the library"));
+    }
+
+    #[test]
+    fn describe_prints_the_image_details() {
+        let (_dir, library, images) = library();
+        let file = library.root().join("a.png");
+        let text = describe(&images[0], &file, true, None);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines[0], format!("path        {}", file.display()));
+        assert_eq!(lines[1], "dimensions  1,920 × 1,080 (16:9, landscape)");
+        assert_eq!(lines[2], "format      PNG");
+        assert!(lines[3].starts_with("file size   "));
+        assert!(lines[4].starts_with("added       "));
+        assert!(lines[5].starts_with("modified    "));
+        assert_eq!(lines[6], "favorite    yes");
+        // Without a desktop shell, whether it is the wallpaper is unknown.
+        assert_eq!(lines.len(), 7);
+
+        let text = describe(&images[0], &file, false, Some(false));
+        assert!(text.contains("favorite    no\n"));
+        assert!(text.ends_with("wallpaper   no\n"));
     }
 
     #[test]

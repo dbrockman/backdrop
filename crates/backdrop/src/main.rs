@@ -1,4 +1,5 @@
 mod cli;
+mod format;
 mod gui;
 
 use backdrop_core::paths::AppPaths;

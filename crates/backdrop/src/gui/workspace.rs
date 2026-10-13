@@ -14,9 +14,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::format::count;
 use super::image_detail::{BackToGrid, ImageDetail};
 use super::library_grid::{LibraryGrid, OpenImage};
+use crate::format::count;
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
