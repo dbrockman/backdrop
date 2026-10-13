@@ -19,7 +19,7 @@ use std::time::Duration;
 use backdrop_core::image::Orientation;
 use backdrop_core::library::{Downloaded, Library};
 use backdrop_core::providers::{ContentRating, Provider, RemoteWallpaper, SearchQuery, SearchSort};
-use backdrop_core::remote_thumbnails::RemoteThumbnails;
+use backdrop_core::remote_images::RemoteThumbnails;
 use gpui_kit::component::button::{
     Button, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
 };
@@ -39,7 +39,9 @@ use gpui_kit::*;
 
 use super::api_key_form::{ApiKeyChanged, ApiKeyForm};
 use super::image_cache::LruImageCache;
-use super::library_grid::{SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp};
+use super::library_grid::{
+    OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
+};
 use super::tiles::{self, GAP, PADDING};
 use crate::format;
 
@@ -49,6 +51,9 @@ actions!(wallhaven_browser, [FocusSearch, DownloadSelected]);
 
 /// Emitted when a download has added an image to the library.
 pub struct LibraryChanged;
+
+/// Emitted when the user asks to see the selected wallpaper in full.
+pub struct OpenWallpaper;
 
 /// Decoded thumbnails kept in memory; well above the tiles visible at once.
 const DECODED_THUMBNAILS: usize = 300;
@@ -105,15 +110,15 @@ enum Thumbnail {
 /// Bytes received so far and the total, if known, written from the download
 /// thread and read when drawing.
 #[derive(Default)]
-struct DownloadProgress {
-    received: AtomicU64,
+pub(super) struct DownloadProgress {
+    pub(super) received: AtomicU64,
     /// `u64::MAX` while the size is unknown.
-    total: AtomicU64,
+    pub(super) total: AtomicU64,
 }
 
 impl DownloadProgress {
     /// The share received, from 0 to 100, once the size is known.
-    fn percent(&self) -> Option<f32> {
+    pub(super) fn percent(&self) -> Option<f32> {
         let total = self.total.load(Ordering::Relaxed);
         let received = self.received.load(Ordering::Relaxed);
         (total != u64::MAX && total > 0).then(|| received as f32 * 100. / total as f32)
@@ -223,7 +228,6 @@ impl WallhavenBrowser {
         &self.wallpapers
     }
 
-    #[cfg(test)]
     pub fn is_in_library(&self, id: &str) -> bool {
         self.in_library.contains(id)
     }
@@ -231,6 +235,22 @@ impl WallhavenBrowser {
     #[cfg(test)]
     pub fn is_downloading(&self, id: &str) -> bool {
         self.downloads.contains_key(id)
+    }
+
+    /// The progress of the download of wallpaper `id`, if one runs: the share
+    /// received from 0 to 100, once the size is known.
+    pub fn download_progress(&self, id: &str) -> Option<Option<f32>> {
+        Some(self.downloads.get(id)?.percent())
+    }
+
+    /// Whether downloads have a library folder to go to.
+    pub fn has_library(&self) -> bool {
+        self.library.is_some()
+    }
+
+    /// Matching wallpapers on all pages, as the provider counts them.
+    pub fn total(&self) -> u64 {
+        self.total
     }
 
     /// Downloads go to `library`, or are unavailable without one.
@@ -407,7 +427,7 @@ impl WallhavenBrowser {
             .position(|wallpaper| wallpaper.id() == selected)
     }
 
-    fn selected_wallpaper(&self) -> Option<&RemoteWallpaper> {
+    pub fn selected_wallpaper(&self) -> Option<&RemoteWallpaper> {
         self.wallpapers.get(self.selected_ix()?)
     }
 
@@ -428,7 +448,7 @@ impl WallhavenBrowser {
         cx.notify();
     }
 
-    fn move_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
+    pub fn move_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
         if self.wallpapers.is_empty() {
             return;
         }
@@ -613,6 +633,7 @@ impl WallhavenBrowser {
 }
 
 impl EventEmitter<LibraryChanged> for WallhavenBrowser {}
+impl EventEmitter<OpenWallpaper> for WallhavenBrowser {}
 
 impl Render for WallhavenBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -641,6 +662,11 @@ impl Render for WallhavenBrowser {
             )
             .on_action(cx.listener(|this, _: &DownloadSelected, window, cx| {
                 this.download_selected(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
+                if this.selected_wallpaper().is_some() {
+                    cx.emit(OpenWallpaper);
+                }
             }))
             .size_full()
             .child(self.render_toolbar(cx))
@@ -951,9 +977,12 @@ impl WallhavenBrowser {
             .h(tile.height)
             .child(picture)
             .when(selected, |tile| tile.child(tiles::selection_ring(rem, cx)))
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 window.focus(&this.focus_handle, cx);
                 this.select(ix, cx);
+                if event.click_count() == 2 {
+                    cx.emit(OpenWallpaper);
+                }
             }))
             .into_any_element()
     }

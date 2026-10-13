@@ -42,7 +42,7 @@ pub struct BackToGrid;
 /// Decoded images kept in memory: the current image, its thumbnail shown while
 /// it loads, and the previous image for quick back-and-forth.
 const DECODED_IMAGES: usize = 4;
-const SIDEBAR_WIDTH: f32 = 20.;
+pub const SIDEBAR_WIDTH: f32 = 20.;
 
 /// Where an image came from, as the library records it.
 struct Provenance {

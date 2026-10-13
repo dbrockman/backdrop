@@ -709,7 +709,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Wallhaven provider implementation
 - [x] Recognize Wallhaven filenames
 - [x] Snapshot provider metadata into the library
-- [ ] Display provider tags
+- [x] Display provider tags
 - [x] Search and browse Wallhaven
 - [x] API-key configuration
 - [x] SFW/NSFW filtering

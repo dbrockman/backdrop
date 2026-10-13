@@ -5,6 +5,7 @@ use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::library::{Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::providers::Provider;
+use backdrop_core::remote_images::RemotePreviews;
 use backdrop_core::settings::{LibraryStatus, Settings};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
@@ -18,10 +19,14 @@ use gpui_kit::*;
 
 use super::image_detail::{BackToGrid, ImageDetail};
 use super::library_grid::{LibraryGrid, OpenImage};
-use super::wallhaven_browser::{LibraryChanged, LibraryLocation, WallhavenBrowser};
+use super::wallhaven_browser::{LibraryChanged, LibraryLocation, OpenWallpaper, WallhavenBrowser};
+use super::wallhaven_detail::{BackToResults, WallhavenDetail};
 use crate::format::count;
 
 pub const KEY_CONTEXT: &str = "Workspace";
+
+/// Full Wallhaven images kept in the cache for the detail view.
+const PREVIEWS_KEPT: usize = 30;
 
 actions!(backdrop, [ChooseLibraryFolder, ShowLibrary, ShowWallhaven]);
 
@@ -71,7 +76,10 @@ pub struct Workspace {
     /// Created the first time the Wallhaven page is shown, so nothing is
     /// requested from Wallhaven until then.
     wallhaven: Option<Entity<WallhavenBrowser>>,
-    _wallhaven_subscription: Option<Subscription>,
+    _wallhaven_subscriptions: Vec<Subscription>,
+    /// The Wallhaven result shown in full, over the results.
+    wallhaven_detail: Option<Entity<WallhavenDetail>>,
+    _wallhaven_detail_subscription: Option<Subscription>,
     _activation_subscription: Subscription,
     focus_handle: FocusHandle,
 }
@@ -149,7 +157,9 @@ impl Workspace {
             page: Page::Library,
             provider,
             wallhaven: None,
-            _wallhaven_subscription: None,
+            _wallhaven_subscriptions: Vec::new(),
+            wallhaven_detail: None,
+            _wallhaven_detail_subscription: None,
             _activation_subscription: activation,
             focus_handle,
         }
@@ -210,9 +220,10 @@ impl Workspace {
                         .map(|grid| grid.read(cx).focus_handle().clone())
                 })
                 .unwrap_or_else(|| self.focus_handle.clone()),
-            Page::Wallhaven => match &self.wallhaven {
-                Some(browser) => browser.read(cx).focus_handle().clone(),
-                None => {
+            Page::Wallhaven => match (&self.wallhaven_detail, &self.wallhaven) {
+                (Some(detail), _) => detail.read(cx).focus_handle().clone(),
+                (None, Some(browser)) => browser.read(cx).focus_handle().clone(),
+                (None, None) => {
                     let browser = self.open_wallhaven(window, cx);
                     browser.update(cx, |browser, cx| browser.focus_search(window, cx));
                     cx.notify();
@@ -243,13 +254,92 @@ impl Workspace {
                 cx,
             )
         });
-        self._wallhaven_subscription = Some(cx.subscribe_in(
-            &browser,
-            window,
-            |this, _, _: &LibraryChanged, window, cx| this.library_changed(window, cx),
-        ));
+        self._wallhaven_subscriptions = vec![
+            cx.subscribe_in(
+                &browser,
+                window,
+                |this, _, _: &LibraryChanged, window, cx| this.library_changed(window, cx),
+            ),
+            cx.subscribe_in(
+                &browser,
+                window,
+                |this, _, _: &OpenWallpaper, window, cx| this.open_wallhaven_detail(window, cx),
+            ),
+        ];
         self.wallhaven = Some(browser.clone());
         browser
+    }
+
+    /// Shows the browser's selected wallpaper in full.
+    fn open_wallhaven_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(browser) = self.wallhaven.clone() else {
+            return;
+        };
+        let provider = self.provider.clone();
+        let previews = RemotePreviews::new(self.paths.remote_previews_dir(), PREVIEWS_KEPT);
+        let detail = cx.new(|cx| WallhavenDetail::new(browser, provider, previews, cx));
+        self._wallhaven_detail_subscription = Some(cx.subscribe_in(
+            &detail,
+            window,
+            |this, _, _: &BackToResults, window, cx| this.close_wallhaven_detail(window, cx),
+        ));
+        let focus_handle = detail.read(cx).focus_handle().clone();
+        window.focus(&focus_handle, cx);
+        self.wallhaven_detail = Some(detail);
+        cx.notify();
+    }
+
+    /// Returns to the results, scrolled to the wallpaper shown last.
+    fn close_wallhaven_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.wallhaven_detail = None;
+        self._wallhaven_detail_subscription = None;
+        if let Some(browser) = &self.wallhaven {
+            browser.update(cx, |browser, cx| {
+                if let Some(ix) = browser.selected_ix() {
+                    browser.select(ix, cx);
+                }
+            });
+            let focus_handle = browser.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// A way back to the results and the shown wallpaper's position, for the
+    /// title bar.
+    fn render_wallhaven_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.wallhaven_detail.as_ref()?;
+        let browser = self.wallhaven.as_ref()?.read(cx);
+        let position = browser.selected_ix().map(|ix| {
+            format!(
+                "{} of {}",
+                ix + 1,
+                count(browser.total() as usize, "wallpaper", "wallpapers")
+            )
+        });
+        Some(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("back-to-results")
+                        .ghost()
+                        .small()
+                        .icon(IconName::ChevronLeft)
+                        .label("Results")
+                        .tooltip("Back to the results (Esc)")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_wallhaven_detail(window, cx)
+                        })),
+                )
+                .when_some(position, |row, position| {
+                    row.child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(position),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     /// A download added an image: show it in the library. The download has
@@ -670,15 +760,15 @@ impl Render for Workspace {
             .text_color(cx.theme().foreground)
             .child(
                 TitleBar::new()
-                    .child(h_flex().gap_3().child(self.render_pages(cx)).when(
-                        library_page,
-                        |row| {
-                            row.children(self.render_detail_summary(cx).or_else(|| {
+                    .child(h_flex().gap_3().child(self.render_pages(cx)).map(|row| {
+                        match library_page {
+                            true => row.children(self.render_detail_summary(cx).or_else(|| {
                                 self.render_library_summary(cx)
                                     .map(IntoElement::into_any_element)
-                            }))
-                        },
-                    ))
+                            })),
+                            false => row.children(self.render_wallhaven_summary(cx)),
+                        }
+                    }))
                     .when(
                         library_page && self.grid.is_some() && self.detail.is_none(),
                         |bar| {
@@ -696,15 +786,13 @@ impl Render for Workspace {
                         },
                     ),
             )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .map(|content| match (self.page, &self.wallhaven) {
-                        (Page::Wallhaven, Some(browser)) => content.child(browser.clone()),
-                        _ => content.child(self.render_library(cx)),
-                    }),
-            )
+            .child(v_flex().flex_1().min_h_0().map(|content| {
+                match (self.page, &self.wallhaven, &self.wallhaven_detail) {
+                    (Page::Wallhaven, _, Some(detail)) => content.child(detail.clone()),
+                    (Page::Wallhaven, Some(browser), None) => content.child(browser.clone()),
+                    _ => content.child(self.render_library(cx)),
+                }
+            }))
     }
 }
 
@@ -731,12 +819,15 @@ mod tests {
         Entity<Workspace>,
     ) {
         let images: Vec<_> = (0..count).map(|ix| (format!("{ix}.png"), 64, 40)).collect();
-        open_workspace_with(&images, cx)
+        open_workspace_with(&images, Vec::new(), None, cx)
     }
 
-    /// A workspace whose library folder holds images of these names and sizes.
+    /// A workspace whose library folder holds images of these names and sizes,
+    /// with Wallhaven results served from `pages`.
     fn open_workspace_with(
         images: &[(String, u32, u32)],
+        pages: Vec<Vec<&'static str>>,
+        provider: Option<std::sync::Arc<crate::test_provider::FakeProvider>>,
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
@@ -773,7 +864,9 @@ mod tests {
                 Workspace::new(
                     window_paths,
                     || None,
-                    std::sync::Arc::new(crate::test_provider::FakeProvider::new(Vec::new())),
+                    provider.clone().unwrap_or_else(|| {
+                        std::sync::Arc::new(crate::test_provider::FakeProvider::new(pages.clone()))
+                    }),
                     window,
                     cx,
                 )
@@ -865,7 +958,7 @@ mod tests {
         // Named like a download from the fake provider, at the size its
         // wallpapers report.
         let images = [("fake-aaa111.png".to_owned(), 20, 10)];
-        let (_dir, paths, window, workspace) = open_workspace_with(&images, cx);
+        let (_dir, paths, window, workspace) = open_workspace_with(&images, Vec::new(), None, cx);
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.render_frame(cx);
@@ -906,5 +999,92 @@ mod tests {
             .get(std::path::Path::new("fake-aaa111.png"))
             .unwrap();
         assert_eq!(record.source(), Some("fake/aaa111"));
+    }
+    #[gpui_kit::test]
+    fn enter_shows_a_wallhaven_result_with_its_tags_and_full_image(cx: &mut TestAppContext) {
+        let pages = vec![vec!["aaa111", "bbb222", "ccc333"]];
+        let (_dir, paths, window, workspace) = open_workspace_with(&[], pages, None, cx);
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("wallpaper-aaa111", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        let detail = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .wallhaven_detail
+                .clone()
+                .expect("detail open")
+        });
+        let browser = cx.update(|cx| workspace.read(cx).wallhaven.clone().unwrap());
+        let settle = |cx: &mut TestAppContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+        };
+        settle(cx);
+
+        assert_eq!(
+            cx.update(|cx| detail.read(cx).tags(cx)),
+            ["mountains", "lake"]
+        );
+        let preview = cx
+            .update(|cx| detail.read(cx).preview_file())
+            .expect("full image");
+        assert!(preview.starts_with(paths.remote_previews_dir()));
+
+        cx.update_window(window, |_, window, cx| window.press("right", cx))
+            .unwrap();
+        settle(cx);
+        assert_eq!(cx.update(|cx| browser.read(cx).selected_ix()), Some(1));
+        assert_eq!(
+            cx.update(|cx| detail.read(cx).tags(cx)),
+            ["mountains", "lake"]
+        );
+
+        cx.update_window(window, |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        assert!(cx.update(|cx| workspace.read(cx).wallhaven_detail.is_none()));
+        assert_eq!(cx.update(|cx| browser.read(cx).selected_ix()), Some(1));
+        // Focus is back in the results, so arrow keys move their selection.
+        cx.update_window(window, |_, window, cx| window.press("right", cx))
+            .unwrap();
+        assert_eq!(cx.update(|cx| browser.read(cx).selected_ix()), Some(2));
+    }
+    #[gpui_kit::test]
+    fn stepping_quickly_only_loads_the_wallpaper_it_stops_on(cx: &mut TestAppContext) {
+        let provider = std::sync::Arc::new(crate::test_provider::FakeProvider::new(vec![vec![
+            "aaa111", "bbb222", "ccc333",
+        ]]));
+        let (_dir, paths, window, _workspace) =
+            open_workspace_with(&[], Vec::new(), Some(provider.clone()), cx);
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("wallpaper-aaa111", cx);
+            window.press("enter", cx);
+            window.press("right", cx);
+            window.press("right", cx);
+        })
+        .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+
+        assert_eq!(provider.detail_requests(), ["ccc333"]);
+        let previews = std::fs::read_dir(paths.remote_previews_dir().join("fake"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(previews, ["ccc333.preview"]);
     }
 }

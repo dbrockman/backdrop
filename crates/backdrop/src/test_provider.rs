@@ -15,6 +15,8 @@ use image::{ImageFormat, Rgb, RgbImage};
 pub struct FakeProvider {
     pages: Vec<Vec<&'static str>>,
     searches: Mutex<Vec<SearchQuery>>,
+    /// Ids whose details were requested, in order.
+    details: Mutex<Vec<String>>,
     api_key: Mutex<Option<String>>,
     /// Keys `verify_api_key` rejects.
     rejected_keys: Vec<&'static str>,
@@ -27,6 +29,7 @@ impl FakeProvider {
         Self {
             pages,
             searches: Mutex::new(Vec::new()),
+            details: Mutex::new(Vec::new()),
             api_key: Mutex::new(None),
             rejected_keys: Vec::new(),
             offline: false,
@@ -49,6 +52,10 @@ impl FakeProvider {
 
     pub fn searches(&self) -> Vec<SearchQuery> {
         self.searches.lock().unwrap().clone()
+    }
+
+    pub fn detail_requests(&self) -> Vec<String> {
+        self.details.lock().unwrap().clone()
     }
 }
 
@@ -98,6 +105,7 @@ impl Provider for FakeProvider {
     }
 
     fn wallpaper(&self, id: &str) -> Result<RemoteWallpaper, ProviderError> {
+        self.details.lock().unwrap().push(id.to_owned());
         Ok(RemoteWallpaper::for_test("fake", id).with_tags(&["mountains", "lake"]))
     }
 

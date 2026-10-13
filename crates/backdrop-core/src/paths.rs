@@ -13,6 +13,7 @@ const DATABASE_FILE: &str = "library.sqlite3";
 const SETTINGS_FILE: &str = "settings.toml";
 const THUMBNAILS_DIR: &str = "thumbnails";
 const REMOTE_THUMBNAILS_DIR: &str = "remote-thumbnails";
+const REMOTE_PREVIEWS_DIR: &str = "remote-previews";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PathsError {
@@ -70,6 +71,11 @@ impl AppPaths {
 
     pub fn database_file(&self) -> PathBuf {
         self.data_dir.join(DATABASE_FILE)
+    }
+
+    /// Full images of provider wallpapers, looked at before downloading.
+    pub fn remote_previews_dir(&self) -> PathBuf {
+        self.cache_dir.join(REMOTE_PREVIEWS_DIR)
     }
 
     pub fn thumbnails_dir(&self) -> PathBuf {

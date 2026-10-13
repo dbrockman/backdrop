@@ -6,6 +6,7 @@ mod image_detail;
 mod library_grid;
 mod tiles;
 mod wallhaven_browser;
+mod wallhaven_detail;
 mod workspace;
 
 use std::sync::Arc;
@@ -68,6 +69,7 @@ fn bind_keys(cx: &mut App) {
     let grid = library_grid::KEY_CONTEXT;
     let detail = image_detail::KEY_CONTEXT;
     let wallhaven = wallhaven_browser::KEY_CONTEXT;
+    let wallhaven_detail = wallhaven_detail::KEY_CONTEXT;
     cx.bind_keys([
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-o", ChooseLibraryFolder, Some(workspace::KEY_CONTEXT)),
@@ -97,5 +99,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", SelectLast, Some(wallhaven)),
         KeyBinding::new("d", DownloadSelected, Some(wallhaven)),
         KeyBinding::new("ctrl-f", FocusSearch, Some(wallhaven)),
+        KeyBinding::new("enter", OpenSelected, Some(wallhaven)),
+        KeyBinding::new("escape", Back, Some(wallhaven_detail)),
+        KeyBinding::new("left", PreviousImage, Some(wallhaven_detail)),
+        KeyBinding::new("right", NextImage, Some(wallhaven_detail)),
+        KeyBinding::new("d", DownloadSelected, Some(wallhaven_detail)),
     ]);
 }
