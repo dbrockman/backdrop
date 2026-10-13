@@ -5,7 +5,7 @@
 //! save replaces the file atomically so a reader never sees a partial write.
 
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -72,9 +72,11 @@ impl Settings {
     /// Writes settings to `path`, creating its directory if needed.
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
         let text = toml::to_string_pretty(self).map_err(SettingsError::Serialize)?;
-        write_atomically(path, text.as_bytes()).map_err(|cause| SettingsError::Write {
-            path: path.to_path_buf(),
-            cause,
+        crate::fs_util::write_atomically(path, text.as_bytes()).map_err(|cause| {
+            SettingsError::Write {
+                path: path.to_path_buf(),
+                cause,
+            }
         })
     }
 
@@ -116,20 +118,6 @@ impl Settings {
             Some(dir) => LibraryStatus::Missing(dir.to_path_buf()),
         }
     }
-}
-
-/// Writes to a temporary file beside `path`, then renames it over `path`.
-fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    fs::create_dir_all(dir)?;
-    let mut file = tempfile::NamedTempFile::new_in(dir)?;
-    file.write_all(contents)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
 }
 
 #[cfg(test)]

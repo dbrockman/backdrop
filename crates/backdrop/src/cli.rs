@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use backdrop_core::index::{ImageOrder, Index, ScanSummary};
+use backdrop_core::index::ImageOrder;
+use backdrop_core::library::{Library, LibraryScan};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::settings::{LibraryStatus, Settings};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -28,8 +29,12 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = Sort::Added)]
         sort: Sort,
     },
-    /// Update the index with new, changed, and removed images.
-    Scan,
+    /// Update the index and metadata with new, changed, moved, and removed images.
+    Scan {
+        /// Also remove metadata of missing images when there are many of them.
+        #[arg(long)]
+        remove_missing: bool,
+    },
     /// Print the library folder, or change it.
     Library {
         #[command(subcommand)]
@@ -73,17 +78,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Gui => unreachable!("the GUI is started by main"),
         Command::List { sort } => list(&paths, sort.into()),
-        Command::Scan => {
-            let (_, _, summary) = scan(&paths)?;
-            println!(
-                "{} images: {} added, {} updated, {} removed",
-                summary.total(),
-                summary.added(),
-                summary.updated(),
-                summary.removed()
-            );
-            Ok(())
-        }
+        Command::Scan { remove_missing } => scan_command(&paths, remove_missing),
         Command::Library { command: None } => print_library(&paths.settings_file()),
         Command::Library {
             command: Some(LibraryCommand::Set { dir }),
@@ -98,26 +93,63 @@ pub fn run(command: Command) -> anyhow::Result<()> {
 /// Scans first, so the list is never stale. Scanning an unchanged library only
 /// checks file sizes and modification times.
 fn list(paths: &AppPaths, order: ImageOrder) -> anyhow::Result<()> {
-    let (root, index, _) = scan(paths)?;
-    for image in index.images(order)? {
-        println!("{}", root.join(image.path()).display());
+    let (library, _) = scan(paths)?;
+    for image in library.images(order)? {
+        println!("{}", library.root().join(image.path()).display());
     }
     Ok(())
 }
 
-/// Scans the library, printing any files that could not be indexed.
-fn scan(paths: &AppPaths) -> anyhow::Result<(PathBuf, Index, ScanSummary)> {
+fn scan_command(paths: &AppPaths, remove_missing: bool) -> anyhow::Result<()> {
+    let (mut library, scan) = scan(paths)?;
+    let index = scan.index();
+    println!(
+        "{} images: {} added, {} updated, {} removed",
+        index.total(),
+        index.added(),
+        index.updated(),
+        index.removed()
+    );
+    let Ok(metadata) = scan.metadata() else {
+        return Ok(());
+    };
+    for (from, to) in metadata.moved() {
+        println!("metadata moved: {} -> {}", from.display(), to.display());
+    }
+    for path in metadata.removed() {
+        println!("metadata removed: {}", path.display());
+    }
+    let unconfirmed = metadata.unconfirmed_removals();
+    if remove_missing && !unconfirmed.is_empty() {
+        let removed = library.remove_missing(unconfirmed)?;
+        println!("metadata removed for {removed} missing images");
+    } else if !unconfirmed.is_empty() {
+        eprintln!(
+            "warning: {} images with metadata are missing; their metadata was kept. \
+             Run `backdrop scan --remove-missing` to remove it.",
+            unconfirmed.len()
+        );
+    }
+    Ok(())
+}
+
+/// Scans the library, printing any files that could not be indexed and any
+/// metadata problem.
+fn scan(paths: &AppPaths) -> anyhow::Result<(Library, LibraryScan)> {
     let root = library_root(&paths.settings_file())?;
-    let mut index = Index::open(&paths.database_file())?;
-    let summary = index.scan(&root)?;
-    for issue in summary.issues() {
+    let mut library = Library::open(&root, &paths.database_file())?;
+    let scan = library.scan()?;
+    for issue in scan.index().issues() {
         eprintln!(
             "warning: skipped {}: {}",
             root.join(issue.path()).display(),
             issue.message()
         );
     }
-    Ok((root, index, summary))
+    if let Err(error) = scan.metadata() {
+        eprintln!("warning: metadata not updated: {error}");
+    }
+    Ok((library, scan))
 }
 
 fn library_root(settings_file: &Path) -> anyhow::Result<PathBuf> {

@@ -370,10 +370,12 @@ Wallpapers/
 
 `.backdrop/` is created only when there is something to write, so browsing a folder never modifies it.
 
-**`metadata.toml`** holds one record per image that has user data or a provider association, keyed by its path relative to the library root. Images without metadata have no record.
+**`metadata.toml`** holds one record per image that has user data or a provider association, keyed by its path relative to the library root with `/` separators. Images without metadata have no record, and a record left with nothing but its hash is removed. The file starts with a format version; Backdrop refuses to read or write a file from a newer version, and keeps fields it doesn't know when rewriting it.
 
 ```toml
-["dark/wallhaven-94x38z.jpg"]
+version = 1
+
+[images."dark/wallhaven-94x38z.jpg"]
 hash = "blake3:9f2c…"
 favorite = true
 tags = ["mountains", "night"]
@@ -654,7 +656,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Settings persistence and library directory configuration
 - [x] Recursive image discovery
 - [x] SQLite index, rebuildable from the library
-- [ ] Content hashing and library metadata reconciliation
+- [x] Content hashing and library metadata reconciliation
 - [ ] Asynchronous thumbnail generation and caching
 - [ ] Image grid
 - [ ] Image detail view

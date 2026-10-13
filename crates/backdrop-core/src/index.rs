@@ -16,10 +16,11 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
 use crate::discovery::{self, DiscoveryError, FileStamp, ScanIssue};
+use crate::fs_util;
 use crate::image::{ImageFile, ImageFormat};
 
 /// Bump when the schema changes; existing databases are then rebuilt.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS meta (
@@ -34,7 +35,9 @@ const SCHEMA: &str = "
         added INTEGER NOT NULL,
         width INTEGER NOT NULL,
         height INTEGER NOT NULL,
-        format TEXT NOT NULL
+        format TEXT NOT NULL,
+        -- Content hash, computed only when needed; cleared when the file changes.
+        hash TEXT
     );
     CREATE INDEX IF NOT EXISTS images_by_added ON images (added);
     CREATE INDEX IF NOT EXISTS images_by_modified ON images (modified);
@@ -50,6 +53,8 @@ pub enum IndexError {
     Database(rusqlite::Error),
     #[error(transparent)]
     Discovery(DiscoveryError),
+    #[error("could not read {}: {cause}", path.display())]
+    Hash { path: PathBuf, cause: io::Error },
 }
 
 impl From<rusqlite::Error> for IndexError {
@@ -91,6 +96,10 @@ pub struct ScanSummary {
     updated: usize,
     removed: usize,
     issues: Vec<ScanIssue>,
+    /// The last known size of each image this scan removed.
+    pub(crate) removed_sizes: HashMap<PathBuf, u64>,
+    /// Paths that could not be read; images below them may still exist.
+    pub(crate) unreadable: Vec<PathBuf>,
 }
 
 impl ScanSummary {
@@ -114,6 +123,14 @@ impl ScanSummary {
     /// Files and folders that could not be indexed.
     pub fn issues(&self) -> &[ScanIssue] {
         &self.issues
+    }
+
+    /// Whether an image at `path` that is not in the index may still exist,
+    /// because its folder could not be read.
+    pub(crate) fn may_exist(&self, path: &Path) -> bool {
+        self.unreadable
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
     }
 }
 
@@ -193,7 +210,8 @@ impl Index {
                     added = excluded.added,
                     width = excluded.width,
                     height = excluded.height,
-                    format = excluded.format",
+                    format = excluded.format,
+                    hash = NULL",
             )?;
             for image in &discovery.changed {
                 upsert.execute(params![
@@ -213,10 +231,11 @@ impl Index {
             }
 
             let mut delete = transaction.prepare("DELETE FROM images WHERE path = ?1")?;
-            for path in known.keys() {
+            for (path, stamp) in &known {
                 if !discovery.found.contains(path) && !discovery.may_exist(path) {
                     delete.execute([path_bytes(path)])?;
                     summary.removed += 1;
+                    summary.removed_sizes.insert(path.clone(), stamp.size);
                 }
             }
         }
@@ -225,6 +244,7 @@ impl Index {
         summary.total = total as usize;
         transaction.commit()?;
         summary.issues = discovery.issues;
+        summary.unreadable = discovery.unreadable;
         Ok(summary)
     }
 
@@ -252,6 +272,46 @@ impl Index {
             })?
             .collect::<Result<_, _>>()?;
         Ok(images)
+    }
+
+    /// The content hash of the indexed image at `path`, computing and caching it
+    /// if needed. Returns `None` if the image is not indexed.
+    pub(crate) fn hash(&self, root: &Path, path: &Path) -> Result<Option<String>, IndexError> {
+        let cached: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT hash FROM images WHERE path = ?1",
+                [path_bytes(path)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match cached {
+            None => Ok(None),
+            Some(Some(hash)) => Ok(Some(hash)),
+            Some(None) => {
+                let hash =
+                    fs_util::hash_file(&root.join(path)).map_err(|cause| IndexError::Hash {
+                        path: path.to_path_buf(),
+                        cause,
+                    })?;
+                self.connection.execute(
+                    "UPDATE images SET hash = ?1 WHERE path = ?2",
+                    params![hash, path_bytes(path)],
+                )?;
+                Ok(Some(hash))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_hash(&self, path: &Path) -> Option<String> {
+        self.connection
+            .query_row(
+                "SELECT hash FROM images WHERE path = ?1",
+                [path_bytes(path)],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     /// The library root the index was last scanned for.

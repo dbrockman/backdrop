@@ -5,7 +5,10 @@
 //! use the same behavior, database, and configuration.
 
 pub mod discovery;
+mod fs_util;
 pub mod image;
 pub mod index;
+pub mod library;
+pub mod metadata;
 pub mod paths;
 pub mod settings;

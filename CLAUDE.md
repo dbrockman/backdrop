@@ -29,6 +29,8 @@ Two crates; dependencies point one way: **backdrop → backdrop-core**.
 
 Library scanning: `discovery` walks the library (skipping hidden entries and symlinks) and reads only the headers of new or changed files, judged by size and mtime; `index::Index::scan` applies the result to SQLite in one transaction. The index is derived data: a `SCHEMA_VERSION` bump deletes and rebuilds the database instead of migrating, and the index covers one library root (scanning another root clears it). Images under folders that couldn't be read are kept, never treated as removed.
 
+`library::Library` is what the GUI and CLI use: it pairs the index with `metadata::LibraryMetadata` (`.backdrop/metadata.toml`, the source of truth for user data) and reconciles them on every scan, following renamed and moved images by size and blake3 hash (spec §5.3). Hashes are computed only on demand and cached in the index's `hash` column. Metadata changes go through `LibraryMetadata::update`, which re-reads before writing; reconciliation skips any record another process changed in the meantime. Removing many records at once is returned as `unconfirmed_removals` for the front end to confirm, then `Library::remove_missing`.
+
 GUI and CLI share the same settings and database, so the design must allow concurrent access from both processes (spec §8.3). Settings (`backdrop_core::settings`, TOML in the config dir) are changed only through `Settings::update`, which re-reads the file before applying a change and saves atomically. The GUI never saves after a failed load, so a malformed file isn't replaced with defaults.
 
 ## GPUI Kit

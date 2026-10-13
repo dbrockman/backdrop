@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 backdrop-core = { path = "crates/backdrop-core" }
 anyhow = "1"
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 imagesize = { version = "0.15", default-features = false, features = ["jpeg", "png", "webp"] }
