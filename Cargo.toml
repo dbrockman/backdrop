@@ -19,12 +19,14 @@ directories = "6"
 fastrand = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
 gpui-kit = "=0.7.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 toml = "1"
 trash = "5"
+ureq = "3"
 walkdir = "2"
 
 [profile.release]

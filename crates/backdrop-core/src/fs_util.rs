@@ -5,7 +5,8 @@ use std::io::{self, Write as _};
 use std::path::Path;
 
 /// Writes to a temporary file beside `path`, then renames it over `path`, so
-/// readers see either the old contents or the new, never a partial write.
+/// readers see either the old contents or the new, never a partial write. The
+/// new file is readable only by the user, as temporary files are created.
 pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()

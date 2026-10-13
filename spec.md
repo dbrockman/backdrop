@@ -614,7 +614,7 @@ backdrop library [set <dir>]
 backdrop paths
 ```
 
-Later phases add commands alongside their features, such as `backdrop git status` (Phase 3). Future commands could provide provider search, downloads, filtering, and metadata editing.
+Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide downloads, filtering, and metadata editing.
 
 CLI operations should use the same settings, database, and core logic as the GUI.
 
@@ -683,7 +683,7 @@ The goal is a useful offline wallpaper browser.
 
 ### Phase 2 — Wallhaven
 
-- [ ] Wallhaven provider implementation
+- [x] Wallhaven provider implementation
 - [ ] Recognize Wallhaven filenames
 - [ ] Snapshot provider metadata into the library
 - [ ] Display provider tags

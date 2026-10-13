@@ -3,6 +3,7 @@
 //! The GUI and CLI may run at the same time, so writers go through
 //! [`Settings::update`], which re-reads the file before changing it, and every
 //! save replaces the file atomically so a reader never sees a partial write.
+//! The file can hold API keys, so only the user can read it.
 
 use std::fs;
 use std::io;
@@ -33,12 +34,37 @@ pub enum SettingsError {
 #[serde(default)]
 pub struct Settings {
     library: LibrarySettings,
+    providers: ProviderSettings,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct LibrarySettings {
     directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct ProviderSettings {
+    wallhaven: WallhavenSettings,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct WallhavenSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key: Option<Secret>,
+}
+
+/// A credential, left out of `Debug` output so it doesn't end up in logs.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Secret(String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<secret>")
+    }
 }
 
 /// Whether the configured library folder can be used.
@@ -108,6 +134,23 @@ impl Settings {
         }
         self.library.directory = Some(dir.clone());
         Ok(dir)
+    }
+
+    /// The Wallhaven API key, needed for NSFW wallpapers.
+    pub fn wallhaven_api_key(&self) -> Option<&str> {
+        self.providers
+            .wallhaven
+            .api_key
+            .as_ref()
+            .map(|key| key.0.as_str())
+    }
+
+    /// Sets or, with `None` or an empty key, removes the Wallhaven API key.
+    pub fn set_wallhaven_api_key(&mut self, key: Option<&str>) {
+        self.providers.wallhaven.api_key = key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(|key| Secret(key.to_owned()));
     }
 
     /// Checks the configured library folder against the filesystem.
@@ -216,6 +259,38 @@ mod tests {
             Settings::load(&file),
             Err(SettingsError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn api_key_is_stored_privately_and_never_debug_printed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("settings.toml");
+
+        Settings::update(&file, |s| {
+            s.set_wallhaven_api_key(Some(" abc123 "));
+            Ok(())
+        })
+        .unwrap();
+        let settings = Settings::load(&file).unwrap();
+
+        assert_eq!(settings.wallhaven_api_key(), Some("abc123"));
+        assert!(!format!("{settings:?}").contains("abc123"));
+        // Only the user can read the file holding the key.
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+    }
+
+    #[test]
+    fn empty_api_key_removes_it() {
+        let mut settings = Settings::default();
+        settings.set_wallhaven_api_key(Some("abc123"));
+
+        settings.set_wallhaven_api_key(Some("  "));
+
+        assert_eq!(settings.wallhaven_api_key(), None);
+        assert_eq!(settings, Settings::default());
     }
 
     #[test]

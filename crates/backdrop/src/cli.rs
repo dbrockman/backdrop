@@ -14,6 +14,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::format;
 
+mod wallhaven;
+
+use wallhaven::WallhavenCommand;
+
 /// Browse, organize, download, and manage wallpapers.
 ///
 /// Run without a command to open the graphical interface.
@@ -84,6 +88,11 @@ pub enum Command {
     Library {
         #[command(subcommand)]
         command: Option<LibraryCommand>,
+    },
+    /// Search and describe wallpapers on Wallhaven.
+    Wallhaven {
+        #[command(subcommand)]
+        command: WallhavenCommand,
     },
     /// Print where Backdrop stores its settings, index, and thumbnails.
     Paths,
@@ -186,6 +195,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
             print_paths(&paths);
             Ok(())
         }
+        Command::Wallhaven { command } => wallhaven::run(&paths.settings_file(), command),
     }
 }
 
@@ -234,11 +244,7 @@ fn info(paths: &AppPaths, image: &Path) -> anyhow::Result<()> {
 /// The lines `backdrop info` prints for `image`, whose absolute path is `file`.
 fn describe(image: &ImageFile, file: &Path, favorite: bool, wallpaper: Option<bool>) -> String {
     let yes_no = |value: bool| if value { "yes" } else { "no" };
-    let orientation = match image.orientation() {
-        Orientation::Landscape => "landscape",
-        Orientation::Portrait => "portrait",
-        Orientation::Square => "square",
-    };
+    let orientation = orientation_name(image.orientation());
     let mut lines = vec![
         ("path", file.display().to_string()),
         (
@@ -262,6 +268,15 @@ fn describe(image: &ImageFile, file: &Path, favorite: bool, wallpaper: Option<bo
         .into_iter()
         .map(|(label, value)| format!("{label:<12}{value}\n"))
         .collect()
+}
+
+/// How `info` commands name an orientation.
+fn orientation_name(orientation: Orientation) -> &'static str {
+    match orientation {
+        Orientation::Landscape => "landscape",
+        Orientation::Portrait => "portrait",
+        Orientation::Square => "square",
+    }
 }
 
 /// The indexed image at `image`, a path given on the command line.

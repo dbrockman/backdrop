@@ -12,6 +12,7 @@ pub mod index;
 pub mod library;
 pub mod metadata;
 pub mod paths;
+pub mod providers;
 pub mod query;
 pub mod settings;
 pub mod thumbnails;

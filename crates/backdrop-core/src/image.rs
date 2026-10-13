@@ -37,6 +37,17 @@ pub enum Orientation {
     Square,
 }
 
+impl Orientation {
+    /// The orientation of an image `width` wide and `height` tall.
+    pub fn of(width: u32, height: u32) -> Self {
+        match width.cmp(&height) {
+            std::cmp::Ordering::Greater => Self::Landscape,
+            std::cmp::Ordering::Less => Self::Portrait,
+            std::cmp::Ordering::Equal => Self::Square,
+        }
+    }
+}
+
 /// An image in the library. Times are nanoseconds since the Unix epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageFile {
@@ -106,10 +117,6 @@ impl ImageFile {
     }
 
     pub fn orientation(&self) -> Orientation {
-        match self.width.cmp(&self.height) {
-            std::cmp::Ordering::Greater => Orientation::Landscape,
-            std::cmp::Ordering::Less => Orientation::Portrait,
-            std::cmp::Ordering::Equal => Orientation::Square,
-        }
+        Orientation::of(self.width, self.height)
     }
 }
