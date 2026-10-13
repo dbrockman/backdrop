@@ -268,13 +268,24 @@ impl ImageDetail {
                 .background_spawn(async move {
                     let wallpaper = provider.wallpaper(&id)?;
                     Library::open(&root, &database)?.link_source(&linked_path, &wallpaper)?;
-                    anyhow::Ok(())
+                    // The library may already have had a snapshot of this
+                    // wallpaper, and filters see that snapshot's tags.
+                    let snapshot = Snapshot::load(&root, &wallpaper.source())?;
+                    let tags = snapshot.map_or_else(Vec::new, |snapshot| {
+                        snapshot.tags().iter().map(|tag| tag.name.clone()).collect()
+                    });
+                    anyhow::Ok(tags)
                 })
                 .await;
             this.update_in(cx, |detail, window, cx| {
                 detail.linking = false;
                 match result {
-                    Ok(()) => detail.reload_provenance(path, cx),
+                    Ok(tags) => {
+                        detail.grid.update(cx, |grid, cx| {
+                            grid.set_provider_tags(&path, tags, cx);
+                        });
+                        detail.reload_provenance(path, cx);
+                    }
                     Err(error) => window.push_notification(
                         Notification::error(error.to_string())
                             .title(format!("Couldn’t get the details from {name}")),

@@ -108,6 +108,14 @@ impl ImageMarks {
         self.provider_tags.get(path).map_or(&[], Vec::as_slice)
     }
 
+    pub fn set_provider_tags(&mut self, path: &Path, tags: Vec<String>) {
+        if tags.is_empty() {
+            self.provider_tags.remove(path);
+        } else {
+            self.provider_tags.insert(path.to_path_buf(), tags);
+        }
+    }
+
     /// Whether the image at `path` has `tag`, from the user or its provider.
     pub fn has_tag(&self, path: &Path, tag: &str) -> bool {
         self.tags(path)

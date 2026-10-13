@@ -860,6 +860,16 @@ impl LibraryGrid {
         cx.notify();
     }
 
+    /// Shows the provider tags of the image at `path`, which was just linked
+    /// to its source.
+    pub fn set_provider_tags(&mut self, path: &Path, tags: Vec<String>, cx: &mut Context<Self>) {
+        self.marks.set_provider_tags(path, tags);
+        if !self.filter.tags().is_empty() {
+            self.apply_filter(cx);
+        }
+        cx.notify();
+    }
+
     fn set_favorite_shown(&mut self, path: &Path, favorite: bool, cx: &mut Context<Self>) {
         self.marks.set_favorite(path, favorite);
         if self.filter.is_favorites_only() {

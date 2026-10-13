@@ -813,6 +813,7 @@ impl Render for Workspace {
 mod tests {
     use backdrop_core::library::Library;
     use backdrop_core::paths::AppPaths;
+    use backdrop_core::query::ImageFilter;
     use backdrop_core::settings::LibraryStatus;
     use backdrop_core::settings::Settings;
     use gpui_kit::component::Root;
@@ -1013,6 +1014,15 @@ mod tests {
             .get(std::path::Path::new("fake-aaa111.png"))
             .unwrap();
         assert_eq!(record.source(), Some("fake/aaa111"));
+
+        // The grid's tag filter sees the new tags without a rescan.
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().unwrap());
+        cx.update(|cx| {
+            grid.update(cx, |grid, cx| {
+                grid.set_filter(ImageFilter::default().with_tags(vec!["Lake".into()]), cx)
+            })
+        });
+        assert_eq!(cx.update(|cx| grid.read(cx).images().len()), 1);
     }
     #[gpui_kit::test]
     fn enter_shows_a_wallhaven_result_with_its_tags_and_full_image(cx: &mut TestAppContext) {
