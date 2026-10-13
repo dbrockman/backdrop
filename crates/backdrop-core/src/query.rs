@@ -128,30 +128,44 @@ impl ImageMarks {
     /// Each image counts once per tag, whoever gave it the tag.
     pub fn tag_counts<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) -> Vec<TagCount> {
         let mut counts: HashMap<String, TagCount> = HashMap::new();
+        // How many times each spelling is used, by the user and by providers.
+        let mut spellings: HashMap<String, [HashMap<&str, usize>; 2]> = HashMap::new();
         for path in paths {
             let mut seen = HashSet::new();
             for (tags, from_user) in [(self.tags(path), true), (self.provider_tags(path), false)] {
                 for tag in tags {
                     let key = tag.to_lowercase();
                     let count = counts.entry(key.clone()).or_insert_with(|| TagCount {
-                        name: tag.clone(),
+                        name: String::new(),
                         images: 0,
                         user: 0,
                         provider: 0,
                     });
                     if from_user {
-                        if count.user == 0 {
-                            // The user's spelling wins over a provider's.
-                            count.name = tag.clone();
-                        }
                         count.user += 1;
                     } else {
                         count.provider += 1;
                     }
+                    let used =
+                        &mut spellings.entry(key.clone()).or_default()[usize::from(from_user)];
+                    *used.entry(tag.as_str()).or_default() += 1;
                     if seen.insert(key) {
                         count.images += 1;
                     }
                 }
+            }
+        }
+        for (key, count) in &mut counts {
+            // The user's spelling wins over a provider's, then the most used
+            // one; ties go to the spelling that sorts first, so the name
+            // doesn't depend on the order of the images.
+            let [provider, user] = &spellings[key];
+            let used = if user.is_empty() { provider } else { user };
+            if let Some((name, _)) = used
+                .iter()
+                .min_by(|(a, a_uses), (b, b_uses)| b_uses.cmp(a_uses).then_with(|| a.cmp(b)))
+            {
+                count.name = (*name).to_owned();
             }
         }
         let mut counts: Vec<TagCount> = counts.into_values().collect();
@@ -181,7 +195,7 @@ pub struct TagCount {
 }
 
 impl TagCount {
-    /// The tag as first spelled, preferring the user's spelling.
+    /// The spelling most used for the tag, preferring the user's spelling.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -362,6 +376,41 @@ mod tests {
                 ("night", 1, 1, 0)
             ]
         );
+    }
+
+    #[test]
+    fn a_tag_is_named_by_its_most_used_spelling_whatever_the_image_order() {
+        let tags = |list: &[&str]| list.iter().map(|tag| (*tag).to_owned()).collect();
+        let marks = ImageMarks::new(
+            HashSet::new(),
+            HashMap::from([
+                (PathBuf::from("a.png"), tags(&["night", "Lake"])),
+                (PathBuf::from("b.png"), tags(&["Night", "lake"])),
+                (PathBuf::from("c.png"), tags(&["lake"])),
+            ]),
+            HashMap::from([(PathBuf::from("d.png"), tags(&["NIGHT", "NIGHT"]))]),
+        );
+        let names = |paths: &[&str]| {
+            let mut names: Vec<String> = marks
+                .tag_counts(paths.iter().map(Path::new))
+                .iter()
+                .map(|count| count.name().to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        // A tie goes to the spelling that sorts first; a provider's spelling,
+        // however common, only names tags the user never used.
+        assert_eq!(
+            names(&["a.png", "b.png", "c.png", "d.png"]),
+            ["Night", "lake"]
+        );
+        assert_eq!(
+            names(&["d.png", "c.png", "b.png", "a.png"]),
+            ["Night", "lake"]
+        );
+        assert_eq!(names(&["d.png"]), ["NIGHT"]);
     }
 
     #[test]
