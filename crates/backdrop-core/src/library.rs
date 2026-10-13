@@ -28,9 +28,9 @@ use crate::providers::ProviderError;
 use crate::query::ImageOrder;
 use crate::snapshot::SnapshotError;
 
+pub use crate::query::TagCount;
 pub use download::Downloaded;
 pub use sources::ImageSource;
-pub use tags::TagCount;
 
 /// Removals above both limits in one scan need confirmation.
 const CONFIRM_REMOVALS_FROM_COUNT: usize = 20;

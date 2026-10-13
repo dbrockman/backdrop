@@ -116,11 +116,81 @@ impl ImageMarks {
             .any(|candidate| same_tag(candidate, tag))
     }
 
+    /// The tags of the images at `paths`, user and provider, most used first.
+    /// Each image counts once per tag, whoever gave it the tag.
+    pub fn tag_counts<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) -> Vec<TagCount> {
+        let mut counts: HashMap<String, TagCount> = HashMap::new();
+        for path in paths {
+            let mut seen = HashSet::new();
+            for (tags, from_user) in [(self.tags(path), true), (self.provider_tags(path), false)] {
+                for tag in tags {
+                    let key = tag.to_lowercase();
+                    let count = counts.entry(key.clone()).or_insert_with(|| TagCount {
+                        name: tag.clone(),
+                        images: 0,
+                        user: 0,
+                        provider: 0,
+                    });
+                    if from_user {
+                        if count.user == 0 {
+                            // The user's spelling wins over a provider's.
+                            count.name = tag.clone();
+                        }
+                        count.user += 1;
+                    } else {
+                        count.provider += 1;
+                    }
+                    if seen.insert(key) {
+                        count.images += 1;
+                    }
+                }
+            }
+        }
+        let mut counts: Vec<TagCount> = counts.into_values().collect();
+        counts.sort_by(|a, b| {
+            b.images
+                .cmp(&a.images)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        counts
+    }
+
     /// Forgets an image that left the library.
     pub fn remove(&mut self, path: &Path) {
         self.favorites.remove(path);
         self.tags.remove(path);
         self.provider_tags.remove(path);
+    }
+}
+
+/// A tag used in the library, and how many images have it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagCount {
+    name: String,
+    images: usize,
+    user: usize,
+    provider: usize,
+}
+
+impl TagCount {
+    /// The tag as first spelled, preferring the user's spelling.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Images with this tag, from the user or a provider.
+    pub fn images(&self) -> usize {
+        self.images
+    }
+
+    /// Images the user gave this tag.
+    pub fn user(&self) -> usize {
+        self.user
+    }
+
+    /// Images whose provider gave them this tag.
+    pub fn provider(&self) -> usize {
+        self.provider
     }
 }
 
@@ -254,6 +324,35 @@ mod tests {
                     .with_favorites_only(true)
             ),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_image_counts_once_per_tag_whoever_gave_it() {
+        let tags = |list: &[&str]| list.iter().map(|tag| (*tag).to_owned()).collect();
+        let marks = ImageMarks::new(
+            HashSet::new(),
+            HashMap::from([
+                (PathBuf::from("a.png"), tags(&["Mountains"])),
+                (PathBuf::from("b.png"), tags(&["night"])),
+            ]),
+            HashMap::from([(PathBuf::from("a.png"), tags(&["mountains", "lake"]))]),
+        );
+        let paths = [PathBuf::from("a.png"), PathBuf::from("b.png")];
+
+        let counts = marks.tag_counts(paths.iter().map(PathBuf::as_path));
+
+        let summary: Vec<_> = counts
+            .iter()
+            .map(|count| (count.name(), count.images(), count.user(), count.provider()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("lake", 1, 0, 1),
+                ("Mountains", 1, 1, 1),
+                ("night", 1, 1, 0)
+            ]
         );
     }
 

@@ -14,15 +14,18 @@ use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::image::ImageFile;
 use backdrop_core::image::Orientation;
 use backdrop_core::library::{Library, Trash};
+use backdrop_core::metadata::same_tag;
 use backdrop_core::paths::AppPaths;
-use backdrop_core::query::{ImageFilter, ImageMarks, ImageOrder};
+use backdrop_core::query::{ImageFilter, ImageMarks, ImageOrder, TagCount};
 use backdrop_core::thumbnails::Thumbnails;
 use gpui_kit::component::button::{
     Button, ButtonVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
 };
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
@@ -48,12 +51,17 @@ actions!(
         OpenSelected,
         SetWallpaper,
         DeleteSelected,
-        ToggleFavorite
+        ToggleFavorite,
+        FocusTagFilter,
+        LeaveTagFilter
     ]
 );
 
 /// Emitted when the user asks to see the selected image in full.
 pub struct OpenImage;
+
+/// Tag suggestions shown while typing in the tag filter.
+const TAG_SUGGESTIONS: usize = 8;
 
 /// Decoded thumbnails kept in memory; well above the tiles visible at once.
 const DECODED_THUMBNAILS: usize = 300;
@@ -103,6 +111,9 @@ pub struct LibraryGrid {
     /// The latest tag save. Each save waits for the one before, so quick
     /// edits reach the metadata file in the order they were made.
     tag_save: Option<Task<()>>,
+    /// The text typed to find a tag to filter by.
+    tag_query: Entity<InputState>,
+    _tag_query_subscription: Subscription,
 }
 
 impl LibraryGrid {
@@ -110,8 +121,20 @@ impl LibraryGrid {
         root: PathBuf,
         paths: AppPaths,
         trash: Arc<dyn Trash>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let tag_query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by tag…"));
+        let tag_query_subscription = cx.subscribe_in(
+            &tag_query,
+            window,
+            |grid, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => grid.add_top_suggestion(window, cx),
+                // Suggestions follow what is typed.
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        );
         let load_task = Self::load(&root, &paths, ImageOrder::default(), cx);
         Self {
             root,
@@ -136,6 +159,8 @@ impl LibraryGrid {
             _load_task: load_task,
             _thumbnail_task: None,
             tag_save: None,
+            tag_query,
+            _tag_query_subscription: tag_query_subscription,
         }
     }
 
@@ -553,6 +578,78 @@ impl LibraryGrid {
         self.tag_save = Some(save);
     }
 
+    /// Every tag of the library's images, user and provider, most used
+    /// first. Counted from what the grid holds, so it follows edits at once.
+    pub fn tag_counts(&self) -> Vec<TagCount> {
+        self.marks.tag_counts(self.all.iter().map(ImageFile::path))
+    }
+
+    /// Tags containing the typed text that aren't in the filter yet.
+    fn tag_suggestions(&self, cx: &App) -> Vec<TagCount> {
+        let typed = self.tag_query.read(cx).value().trim().to_lowercase();
+        if typed.is_empty() {
+            return Vec::new();
+        }
+        let selected = self.filter.tags();
+        self.tag_counts()
+            .into_iter()
+            .filter(|count| count.name().to_lowercase().contains(&typed))
+            .filter(|count| !selected.iter().any(|tag| same_tag(tag, count.name())))
+            .take(TAG_SUGGESTIONS)
+            .collect()
+    }
+
+    /// Narrows the grid to images that also have `tag`, and clears the field.
+    fn add_filter_tag(&mut self, tag: String, window: &mut Window, cx: &mut Context<Self>) {
+        let mut tags = self.filter.tags().to_vec();
+        if !tags.iter().any(|existing| same_tag(existing, &tag)) {
+            tags.push(tag);
+            let filter = self.filter.clone().with_tags(tags);
+            self.set_filter(filter, cx);
+        }
+        self.tag_query
+            .update(cx, |query, cx| query.set_value("", window, cx));
+    }
+
+    fn add_top_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(top) = self.tag_suggestions(cx).into_iter().next() {
+            self.add_filter_tag(top.name().to_owned(), window, cx);
+        }
+    }
+
+    fn remove_filter_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
+        let tags = self
+            .filter
+            .tags()
+            .iter()
+            .filter(|existing| !same_tag(existing, tag))
+            .cloned()
+            .collect();
+        let filter = self.filter.clone().with_tags(tags);
+        self.set_filter(filter, cx);
+    }
+
+    fn focus_tag_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus_handle = self.tag_query.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+    }
+
+    /// Escape in the tag field: clears what is typed, then returns to the
+    /// images.
+    fn leave_tag_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tag_query.read(cx).value().is_empty() {
+            self.tag_query
+                .update(cx, |query, cx| query.set_value("", window, cx));
+        } else {
+            window.focus(&self.focus_handle, cx);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn filter(&self) -> &ImageFilter {
+        &self.filter
+    }
+
     fn set_tags_shown(&mut self, path: &Path, tags: Vec<String>, cx: &mut Context<Self>) {
         self.marks.set_tags(path, tags);
         if !self.filter.tags().is_empty() {
@@ -722,6 +819,16 @@ impl Render for LibraryGrid {
             .on_action(cx.listener(|grid, _: &SetWallpaper, window, cx| {
                 grid.set_selected_as_wallpaper(window, cx)
             }))
+            .on_action(
+                cx.listener(|grid, _: &FocusTagFilter, window, cx| {
+                    grid.focus_tag_filter(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|grid, _: &LeaveTagFilter, window, cx| {
+                    grid.leave_tag_filter(window, cx)
+                }),
+            )
             .on_action(cx.listener(|grid, _: &OpenSelected, _, cx| {
                 if grid.selected.is_some() {
                     cx.emit(OpenImage);
@@ -736,6 +843,7 @@ impl Render for LibraryGrid {
             .flex_col()
             .size_full()
             .child(self.render_toolbar(cx))
+            .children(self.render_tag_filter(cx))
             .child(
                 div()
                     .relative()
@@ -846,6 +954,12 @@ impl LibraryGrid {
                         grid.set_filter(filter, cx);
                     })),
             )
+            .child(
+                Input::new(&self.tag_query)
+                    .id("tag-filter")
+                    .w_48()
+                    .prefix(Icon::new(IconName::Search).small()),
+            )
             .child(div().flex_1())
             .when(!self.filter.is_empty(), |toolbar| {
                 toolbar.child(
@@ -882,13 +996,77 @@ impl LibraryGrid {
             )
     }
 
+    /// The tags the grid is filtered by, and suggestions while typing. Shown
+    /// under the toolbar only when there is something to show, wrapping so no
+    /// selected tag is ever hidden.
+    fn render_tag_filter(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.filter.tags().to_vec();
+        let typed = self.tag_query.read(cx).value().trim().to_owned();
+        if selected.is_empty() && typed.is_empty() {
+            return None;
+        }
+        let suggestions = self.tag_suggestions(cx);
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        Some(
+            h_flex()
+                .flex_none()
+                .flex_wrap()
+                .px(rems(PADDING))
+                .py_2()
+                .gap_1()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_sm()
+                .children(selected.into_iter().map(|tag| {
+                    let removed = tag.clone();
+                    Tag::secondary().small().child(
+                        h_flex().gap_1().child(tag.clone()).child(
+                            Button::new(ElementId::Name(format!("remove-filter-tag-{tag}").into()))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .tooltip(format!("Stop filtering by \u{201c}{tag}\u{201d}"))
+                                .on_click(cx.listener(move |grid, _, _, cx| {
+                                    grid.remove_filter_tag(&removed, cx)
+                                })),
+                        ),
+                    )
+                }))
+                .when(!typed.is_empty() && suggestions.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .text_color(muted)
+                            .child(format!("No tags match \u{201c}{typed}\u{201d}")),
+                    )
+                })
+                .children(suggestions.into_iter().map(|count| {
+                    let name = count.name().to_owned();
+                    Button::new(ElementId::Name(format!("filter-tag-{name}").into()))
+                        .outline()
+                        .xsmall()
+                        .label(format!("{name} \u{b7} {}", format::grouped(count.images())))
+                        .on_click(cx.listener(move |grid, _, window, cx| {
+                            grid.add_filter_tag(name.clone(), window, cx)
+                        }))
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_no_matches(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = match (self.filter.orientation(), self.filter.is_favorites_only()) {
-            (Some(Orientation::Landscape), false) => "No landscape images",
-            (Some(Orientation::Portrait), false) => "No portrait images",
-            (Some(Orientation::Square), false) => "No square images",
-            (None, true) => "No favorites yet",
-            _ => "No images match",
+        let title: SharedString = match (
+            self.filter.orientation(),
+            self.filter.is_favorites_only(),
+            self.filter.tags(),
+        ) {
+            (Some(Orientation::Landscape), false, []) => "No landscape images".into(),
+            (Some(Orientation::Portrait), false, []) => "No portrait images".into(),
+            (Some(Orientation::Square), false, []) => "No square images".into(),
+            (None, true, []) => "No favorites yet".into(),
+            (None, false, [tag]) => format!("No images tagged \u{201c}{tag}\u{201d}").into(),
+            (None, false, [_, _, ..]) => "No images have all these tags".into(),
+            _ => "No images match".into(),
         };
         v_flex()
             .size_full()
@@ -998,6 +1176,7 @@ mod tests {
                     fixture.root.clone(),
                     fixture.paths.clone(),
                     fixture.trash.clone(),
+                    window,
                     cx,
                 )
             });
@@ -1233,5 +1412,74 @@ mod tests {
         assert_eq!(cx.update(|cx| grid.read(cx).total()), Some(2));
         // The image that took its place is selected.
         assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(1));
+    }
+    #[gpui_kit::test]
+    fn the_tag_field_suggests_tags_and_narrows_the_grid_to_all_of_them(cx: &mut TestAppContext) {
+        let fixture = library(3);
+        {
+            let mut library = Library::open(&fixture.root, &fixture.paths.database_file()).unwrap();
+            let tags = |list: &[&str]| list.iter().map(|tag| (*tag).to_owned()).collect::<Vec<_>>();
+            library
+                .add_tags(std::path::Path::new("0.png"), &tags(&["Night", "lake"]))
+                .unwrap();
+            library
+                .add_tags(std::path::Path::new("1.png"), &tags(&["night"]))
+                .unwrap();
+        }
+        let (window, grid) = open_grid(&fixture, cx);
+        let shown = |cx: &mut TestAppContext| -> Vec<String> {
+            let mut paths: Vec<String> = cx.update(|cx| {
+                grid.read(cx)
+                    .images()
+                    .iter()
+                    .map(|image| image.path().display().to_string())
+                    .collect()
+            });
+            paths.sort();
+            paths
+        };
+        let act = |cx: &mut TestAppContext,
+                   act: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                act(window, cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let focus_grid = cx.update(|cx| grid.read(cx).focus_handle().clone());
+        cx.update_window(window, |_, window, cx| window.focus(&focus_grid, cx))
+            .unwrap();
+
+        // Enter picks the top suggestion, in the user's spelling.
+        act(cx, &|window, cx| {
+            window.press("ctrl-f", cx);
+            window.input("nig", cx);
+        });
+        act(cx, &|window, cx| window.press("enter", cx));
+        assert_eq!(shown(cx), ["0.png", "1.png"]);
+        assert_eq!(
+            cx.update(|cx| grid.read(cx).filter().tags().to_vec()),
+            ["Night"]
+        );
+
+        // A second tag narrows to images with both.
+        act(cx, &|window, cx| window.input("LAK", cx));
+        act(cx, &|window, cx| window.click("filter-tag-lake", cx));
+        assert_eq!(shown(cx), ["0.png"]);
+
+        // Escape returns to the images, so arrow keys select again.
+        act(cx, &|window, cx| {
+            window.press("escape", cx);
+            window.press("right", cx);
+        });
+        assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(0));
+
+        act(cx, &|window, cx| {
+            window.click("remove-filter-tag-Night", cx)
+        });
+        assert_eq!(shown(cx), ["0.png"]);
+        act(cx, &|window, cx| window.click("remove-filter-tag-lake", cx));
+        assert_eq!(shown(cx), ["0.png", "1.png", "2.png"]);
     }
 }

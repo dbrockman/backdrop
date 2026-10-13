@@ -412,7 +412,7 @@ impl Workspace {
                 let paths = self.paths.clone();
                 let desktop = self.desktop.clone();
                 let grid = cx.new(|cx| {
-                    let mut grid = LibraryGrid::new(root, paths, Arc::new(SystemTrash), cx);
+                    let mut grid = LibraryGrid::new(root, paths, Arc::new(SystemTrash), window, cx);
                     grid.set_desktop(desktop, cx);
                     grid
                 });

@@ -70,10 +70,7 @@ pub struct ImageDetail {
     linking: bool,
     /// Adds a tag to the shown image.
     tag_input: Entity<InputState>,
-    /// Every tag in the library, most used first, for suggestions.
-    tag_counts: Vec<TagCount>,
     _tag_input_subscription: Subscription,
-    _tag_counts_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     image_cache: Entity<LruImageCache>,
     _grid_observation: Subscription,
@@ -111,35 +108,13 @@ impl ImageDetail {
             reading: None,
             linking: false,
             tag_input,
-            tag_counts: Vec::new(),
             _tag_input_subscription: tag_input_subscription,
-            _tag_counts_task: None,
             focus_handle: cx.focus_handle(),
             image_cache: LruImageCache::new(DECODED_IMAGES, cx),
             _provenance_task: None,
         };
         detail.read_provenance(cx);
-        detail.read_tag_counts(cx);
         detail
-    }
-
-    /// Reads every tag in the library, for suggestions.
-    fn read_tag_counts(&mut self, cx: &mut Context<Self>) {
-        let root = self.grid.read(cx).root().to_path_buf();
-        let database = self.database.clone();
-        self._tag_counts_task = Some(cx.spawn(async move |this, cx| {
-            let counts = cx
-                .background_spawn(async move { Library::open(&root, &database)?.tag_counts() })
-                .await;
-            // Without them there are no suggestions; tags still work.
-            if let Ok(counts) = counts {
-                this.update(cx, |detail, cx| {
-                    detail.tag_counts = counts;
-                    cx.notify();
-                })
-                .ok();
-            }
-        }));
     }
 
     /// Adds `tag` to the shown image, unless it has it already.
@@ -152,17 +127,9 @@ impl ImageDetail {
         };
         let mut tags = self.grid.read(cx).tags(&path).to_vec();
         if !tags.iter().any(|existing| same_tag(existing, &tag)) {
-            tags.push(tag.clone());
+            tags.push(tag);
             self.grid
                 .update(cx, |grid, cx| grid.set_tags(path, tags, window, cx));
-            // A new tag becomes a suggestion for other images.
-            if !self
-                .tag_counts
-                .iter()
-                .any(|count| same_tag(count.name(), &tag))
-            {
-                self.read_tag_counts(cx);
-            }
         }
         self.tag_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -196,8 +163,10 @@ impl ImageDetail {
         if typed.is_empty() {
             return Vec::new();
         }
-        let has = self.grid.read(cx).tags(path);
-        self.tag_counts
+        // The grid's counts follow tag edits at once.
+        let grid = self.grid.read(cx);
+        let has = grid.tags(path);
+        grid.tag_counts()
             .iter()
             .map(TagCount::name)
             .filter(|name| name.to_lowercase().contains(&typed))

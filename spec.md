@@ -725,7 +725,7 @@ The goal is a useful offline wallpaper browser.
 ### Phase 3 — Organization and Git
 
 - [x] User-defined tags
-- [ ] Tag autocomplete and multi-tag filtering
+- [x] Tag autocomplete and multi-tag filtering
 - [ ] Favorites
 - [ ] Multi-selection and batch deletion
 - [ ] Git status detection

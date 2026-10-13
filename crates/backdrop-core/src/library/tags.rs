@@ -10,33 +10,8 @@ use std::path::{Path, PathBuf};
 
 use super::{Library, LibraryError};
 use crate::metadata::{normalize_tag, same_tag};
-use crate::query::ImageMarks;
+use crate::query::{ImageMarks, TagCount};
 use crate::snapshot::Snapshot;
-
-/// A tag used in the library, and how many images have it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TagCount {
-    name: String,
-    user: usize,
-    provider: usize,
-}
-
-impl TagCount {
-    /// The tag as first spelled, preferring the user's spelling.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Images the user gave this tag.
-    pub fn user(&self) -> usize {
-        self.user
-    }
-
-    /// Images whose provider gave them this tag.
-    pub fn provider(&self) -> usize {
-        self.provider
-    }
-}
 
 impl Library {
     /// Favorites and tags of every image, for filtering. Provider tags come
@@ -112,41 +87,11 @@ impl Library {
         Ok(stored)
     }
 
-    /// Every tag in the library, user and provider, most used first.
+    /// Every tag of the indexed images, user and provider, most used first.
     pub fn tag_counts(&self) -> Result<Vec<TagCount>, LibraryError> {
         let marks = self.marks()?;
-        let paths: HashSet<PathBuf> = self.indexed_sizes()?.into_keys().collect();
-        let mut counts: HashMap<String, TagCount> = HashMap::new();
-        for path in &paths {
-            for (tags, from_user) in [(marks.tags(path), true), (marks.provider_tags(path), false)]
-            {
-                for tag in tags {
-                    let count = counts
-                        .entry(tag.to_lowercase())
-                        .or_insert_with(|| TagCount {
-                            name: tag.clone(),
-                            user: 0,
-                            provider: 0,
-                        });
-                    if from_user {
-                        if count.user == 0 {
-                            // The user's spelling wins over a provider's.
-                            count.name = tag.clone();
-                        }
-                        count.user += 1;
-                    } else {
-                        count.provider += 1;
-                    }
-                }
-            }
-        }
-        let mut counts: Vec<TagCount> = counts.into_values().collect();
-        counts.sort_by(|a, b| {
-            (b.user + b.provider)
-                .cmp(&(a.user + a.provider))
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        Ok(counts)
+        let paths: Vec<PathBuf> = self.indexed_sizes()?.into_keys().collect();
+        Ok(marks.tag_counts(paths.iter().map(PathBuf::as_path)))
     }
 }
 

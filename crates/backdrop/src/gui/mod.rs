@@ -18,8 +18,8 @@ use gpui_kit::*;
 
 use image_detail::{Back, FocusTags, NextImage, PreviousImage};
 use library_grid::{
-    DeleteSelected, OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight,
-    SelectUp, SetWallpaper, ToggleFavorite,
+    DeleteSelected, FocusTagFilter, LeaveTagFilter, OpenSelected, SelectDown, SelectFirst,
+    SelectLast, SelectLeft, SelectRight, SelectUp, SetWallpaper, ToggleFavorite,
 };
 use wallhaven_browser::{DownloadSelected, FocusSearch};
 use workspace::{ChooseLibraryFolder, ShowLibrary, ShowWallhaven, Workspace};
@@ -90,6 +90,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", SelectDown, Some(grid)),
         KeyBinding::new("home", SelectFirst, Some(grid)),
         KeyBinding::new("end", SelectLast, Some(grid)),
+        KeyBinding::new("ctrl-f", FocusTagFilter, Some(grid)),
+        KeyBinding::new("escape", LeaveTagFilter, Some(grid)),
         KeyBinding::new("f", ToggleFavorite, Some(&grid_letters)),
         KeyBinding::new("enter", OpenSelected, Some(grid)),
         KeyBinding::new("w", SetWallpaper, Some(&grid_letters)),
