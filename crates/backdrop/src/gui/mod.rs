@@ -1,15 +1,19 @@
 //! Graphical interface. Presentation only; behavior comes from `backdrop_core`.
 
+mod format;
+mod image_cache;
+mod image_detail;
 mod library_grid;
-mod thumbnail_cache;
 mod workspace;
 
 use backdrop_core::paths::AppPaths;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
+use image_detail::{Back, NextImage, PreviousImage};
 use library_grid::{
-    SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp, ToggleFavorite,
+    OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
+    ToggleFavorite,
 };
 use workspace::{ChooseLibraryFolder, Workspace};
 
@@ -52,6 +56,7 @@ pub fn run(paths: AppPaths) {
 
 fn bind_keys(cx: &mut App) {
     let grid = library_grid::KEY_CONTEXT;
+    let detail = image_detail::KEY_CONTEXT;
     cx.bind_keys([
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-o", ChooseLibraryFolder, Some(workspace::KEY_CONTEXT)),
@@ -62,5 +67,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", SelectFirst, Some(grid)),
         KeyBinding::new("end", SelectLast, Some(grid)),
         KeyBinding::new("f", ToggleFavorite, Some(grid)),
+        KeyBinding::new("enter", OpenSelected, Some(grid)),
+        KeyBinding::new("escape", Back, Some(detail)),
+        KeyBinding::new("left", PreviousImage, Some(detail)),
+        KeyBinding::new("right", NextImage, Some(detail)),
+        KeyBinding::new("f", ToggleFavorite, Some(detail)),
     ]);
 }

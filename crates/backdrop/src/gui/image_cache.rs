@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 
-/// Keeps the decoded thumbnails of the most recently drawn tiles. GPUI's
+/// Keeps the most recently drawn images decoded and drops older ones. GPUI's
 /// default cache keeps every image it ever loaded, which for a large library
-/// would hold hundreds of megabytes of thumbnails that are off screen.
-pub struct ThumbnailImageCache {
+/// would hold hundreds of megabytes of images that are off screen.
+pub struct LruImageCache {
     capacity: usize,
     items: HashMap<u64, Entry>,
     clock: u64,
@@ -17,7 +17,7 @@ struct Entry {
     last_used: u64,
 }
 
-impl ThumbnailImageCache {
+impl LruImageCache {
     /// `capacity` must exceed the number of tiles visible at once, or visible
     /// tiles evict each other.
     pub fn new(capacity: usize, cx: &mut App) -> Entity<Self> {
@@ -56,7 +56,7 @@ impl ThumbnailImageCache {
     }
 }
 
-impl ImageCache for ThumbnailImageCache {
+impl ImageCache for LruImageCache {
     fn load(
         &mut self,
         resource: &Resource,

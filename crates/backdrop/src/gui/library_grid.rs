@@ -24,7 +24,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::thumbnail_cache::ThumbnailImageCache;
+use super::image_cache::LruImageCache;
 
 pub const KEY_CONTEXT: &str = "LibraryGrid";
 
@@ -37,9 +37,13 @@ actions!(
         SelectDown,
         SelectFirst,
         SelectLast,
+        OpenSelected,
         ToggleFavorite
     ]
 );
+
+/// Emitted when the user asks to see the selected image in full.
+pub struct OpenImage;
 
 /// Decoded thumbnails kept in memory; well above the tiles visible at once.
 const DECODED_THUMBNAILS: usize = 300;
@@ -77,7 +81,7 @@ pub struct LibraryGrid {
     columns: usize,
     scroll_handle: UniformListScrollHandle,
     focus_handle: FocusHandle,
-    image_cache: Entity<ThumbnailImageCache>,
+    image_cache: Entity<LruImageCache>,
     _load_task: Task<()>,
     _thumbnail_task: Option<Task<()>>,
 }
@@ -96,7 +100,7 @@ impl LibraryGrid {
             columns: 1,
             scroll_handle: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
-            image_cache: ThumbnailImageCache::new(DECODED_THUMBNAILS, cx),
+            image_cache: LruImageCache::new(DECODED_THUMBNAILS, cx),
             _load_task: load_task,
             _thumbnail_task: None,
         }
@@ -192,14 +196,36 @@ impl LibraryGrid {
         }
     }
 
-    fn selected_ix(&self) -> Option<usize> {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The images in display order.
+    pub fn images(&self) -> &Arc<Vec<ImageFile>> {
+        &self.images
+    }
+
+    pub fn is_favorite(&self, path: &Path) -> bool {
+        self.favorites.contains(path)
+    }
+
+    /// The cached thumbnail of the image at `path`, once it exists.
+    pub fn thumbnail(&self, path: &Path) -> Option<Arc<Path>> {
+        match self.thumbnails.get(path)? {
+            Thumbnail::Ready(file) => Some(file.clone()),
+            Thumbnail::Failed => None,
+        }
+    }
+
+    pub fn selected_ix(&self) -> Option<usize> {
         let selected = self.selected.as_ref()?;
         self.images
             .iter()
             .position(|image| image.path() == selected)
     }
 
-    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+    /// Selects the image at `ix` and scrolls it into view.
+    pub fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(image) = self.images.get(ix) else {
             return;
         };
@@ -222,7 +248,7 @@ impl LibraryGrid {
         self.select(ix, cx);
     }
 
-    fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.selected.clone() else {
             return;
         };
@@ -388,13 +414,18 @@ impl LibraryGrid {
                 )
             })
             .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
-            .on_click(cx.listener(move |grid, _, window, cx| {
+            .on_click(cx.listener(move |grid, event: &ClickEvent, window, cx| {
                 window.focus(&grid.focus_handle, cx);
                 grid.select(ix, cx);
+                if event.click_count() == 2 {
+                    cx.emit(OpenImage);
+                }
             }))
             .into_any_element()
     }
 }
+
+impl EventEmitter<OpenImage> for LibraryGrid {}
 
 impl Render for LibraryGrid {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -419,6 +450,11 @@ impl Render for LibraryGrid {
             .on_action(cx.listener(|grid, _: &SelectLast, _, cx| {
                 let last = grid.images.len().saturating_sub(1);
                 grid.select(last, cx)
+            }))
+            .on_action(cx.listener(|grid, _: &OpenSelected, _, cx| {
+                if grid.selected.is_some() {
+                    cx.emit(OpenImage);
+                }
             }))
             .on_action(
                 cx.listener(|grid, _: &ToggleFavorite, window, cx| {

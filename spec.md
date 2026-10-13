@@ -659,7 +659,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Content hashing and library metadata reconciliation
 - [x] Asynchronous thumbnail generation and caching
 - [x] Image grid
-- [ ] Image detail view
+- [x] Image detail view
 - [ ] Filter by orientation and sort by date
 - [ ] Niri wallpaper integration
 - [ ] Highlight the current wallpaper

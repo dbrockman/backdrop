@@ -7,12 +7,14 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::library_grid::LibraryGrid;
+use super::format::count;
+use super::image_detail::{BackToGrid, ImageDetail};
+use super::library_grid::{LibraryGrid, OpenImage};
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
@@ -45,6 +47,10 @@ pub struct Workspace {
     scan_task: Option<Task<()>>,
     /// Shown once the first scan of the library has finished.
     grid: Option<Entity<LibraryGrid>>,
+    _grid_subscription: Option<Subscription>,
+    /// The image shown in full, over the grid.
+    detail: Option<Entity<ImageDetail>>,
+    _detail_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
 }
 
@@ -78,6 +84,9 @@ impl Workspace {
             scan: Scan::Running,
             scan_task: None,
             grid: None,
+            _grid_subscription: None,
+            detail: None,
+            _detail_subscription: None,
             focus_handle,
         }
     }
@@ -89,6 +98,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.grid = None;
+        self.detail = None;
         if let LibraryStatus::Available(root) = &status {
             self.scan_library(root.clone(), window, cx);
         }
@@ -142,11 +152,49 @@ impl Workspace {
             None => {
                 let paths = self.paths.clone();
                 let grid = cx.new(|cx| LibraryGrid::new(root, paths, cx));
+                self._grid_subscription = Some(cx.subscribe_in(
+                    &grid,
+                    window,
+                    |this, _, _: &OpenImage, window, cx| this.open_detail(window, cx),
+                ));
                 let focus_handle = grid.read(cx).focus_handle().clone();
                 window.focus(&focus_handle, cx);
                 self.grid = Some(grid);
             }
         }
+    }
+
+    /// Shows the grid's selected image in full.
+    fn open_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(grid) = self.grid.clone() else {
+            return;
+        };
+        let detail = cx.new(|cx| ImageDetail::new(grid, cx));
+        self._detail_subscription = Some(cx.subscribe_in(
+            &detail,
+            window,
+            |this, _, _: &BackToGrid, window, cx| this.close_detail(window, cx),
+        ));
+        let focus_handle = detail.read(cx).focus_handle().clone();
+        window.focus(&focus_handle, cx);
+        self.detail = Some(detail);
+        cx.notify();
+    }
+
+    /// Returns to the grid, scrolled to the image that was shown last.
+    fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detail = None;
+        self._detail_subscription = None;
+        if let Some(grid) = &self.grid {
+            grid.update(cx, |grid, cx| {
+                if let Some(ix) = grid.selected_ix() {
+                    grid.select(ix, cx);
+                }
+            });
+            let focus_handle = grid.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+        }
+        cx.notify();
     }
 
     /// Asks before removing the metadata of many missing images at once. If
@@ -293,6 +341,9 @@ impl Workspace {
                 Some(choose.primary().label("Choose Folder…")),
             ),
             LibraryStatus::Available(_) => {
+                if let Some(detail) = &self.detail {
+                    return detail.clone().into_any_element();
+                }
                 if let Some(grid) = &self.grid {
                     return grid.clone().into_any_element();
                 }
@@ -316,6 +367,47 @@ impl Workspace {
     }
 
     /// The library folder's name and image count, for the title bar.
+    /// A way back to the grid and the shown image's position, for the title
+    /// bar.
+    fn render_detail_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.detail.as_ref()?;
+        let grid = self.grid.as_ref()?.read(cx);
+        let position = grid.selected_ix().map(|ix| {
+            format!(
+                "{} of {}",
+                ix + 1,
+                count(grid.images().len(), "image", "images")
+            )
+        });
+        let folder: SharedString = grid
+            .root()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into();
+        Some(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("back-to-grid")
+                        .ghost()
+                        .small()
+                        .icon(IconName::ChevronLeft)
+                        .label(folder)
+                        .tooltip("Back to all images (Esc)")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_detail(window, cx))),
+                )
+                .when_some(position, |row, position| {
+                    row.child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(position),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn render_library_summary(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let LibraryState::Loaded(LibraryStatus::Available(dir)) = &self.library else {
             return None;
@@ -344,19 +436,6 @@ impl Workspace {
                 }),
         )
     }
-}
-
-/// Formats `n` with thousands separators and the matching noun, e.g. "1,234 images".
-fn count(n: usize, one: &str, many: &str) -> String {
-    let digits = n.to_string();
-    let mut grouped = String::new();
-    for (ix, digit) in digits.chars().enumerate() {
-        if ix > 0 && (digits.len() - ix).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    format!("{grouped} {}", if n == 1 { one } else { many })
 }
 
 fn empty_state(
@@ -389,11 +468,14 @@ impl Render for Workspace {
             .child(
                 TitleBar::new()
                     .child(
-                        self.render_library_summary(cx)
-                            .map(IntoElement::into_any_element)
+                        self.render_detail_summary(cx)
+                            .or_else(|| {
+                                self.render_library_summary(cx)
+                                    .map(IntoElement::into_any_element)
+                            })
                             .unwrap_or_else(|| "Backdrop".into_any_element()),
                     )
-                    .when(self.grid.is_some(), |bar| {
+                    .when(self.grid.is_some() && self.detail.is_none(), |bar| {
                         bar.child(
                             Button::new("change-library-folder")
                                 .ghost()
@@ -413,14 +495,110 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::count;
+    use backdrop_core::library::Library;
+    use backdrop_core::paths::AppPaths;
+    use backdrop_core::settings::Settings;
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Entity, SharedString, TestAppContext, px, size};
+    use image::{Rgb, RgbImage};
 
-    #[test]
-    fn counts_are_grouped_and_pluralized() {
-        assert_eq!(count(0, "image", "images"), "0 images");
-        assert_eq!(count(1, "image", "images"), "1 image");
-        assert_eq!(count(999, "image", "images"), "999 images");
-        assert_eq!(count(1234, "image", "images"), "1,234 images");
-        assert_eq!(count(1234567, "image", "images"), "1,234,567 images");
+    use super::Workspace;
+
+    /// A workspace whose library folder holds `count` small images.
+    fn open_workspace(
+        count: u8,
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        AppPaths,
+        gpui_kit::AnyWindowHandle,
+        Entity<Workspace>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        std::fs::create_dir(&root).unwrap();
+        for ix in 0..count {
+            RgbImage::from_pixel(64, 40, Rgb([ix * 30, 80, 120]))
+                .save(root.join(format!("{ix}.png")))
+                .unwrap();
+        }
+        let paths = AppPaths::new(
+            dir.path().join("config"),
+            dir.path().join("data"),
+            dir.path().join("cache"),
+        );
+        Settings::update(&paths.settings_file(), |settings| {
+            settings.set_library_dir(&root)
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::super::bind_keys(cx);
+        });
+        let mut workspace = None;
+        let window_paths = paths.clone();
+        let handle = cx.open_window(size(px(800.), px(600.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(window_paths, window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        cx.run_until_parked();
+        (dir, paths, handle.into(), workspace.unwrap())
+    }
+
+    #[gpui_kit::test]
+    fn enter_opens_the_selected_image_and_escape_returns_to_it(cx: &mut TestAppContext) {
+        let (_dir, paths, window, workspace) = open_workspace(4, cx);
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().expect("grid after scan"));
+        let tile = |ix: usize, cx: &mut TestAppContext| -> SharedString {
+            cx.update(|cx| {
+                grid.read(cx).images()[ix]
+                    .path()
+                    .to_string_lossy()
+                    .into_owned()
+                    .into()
+            })
+        };
+        let first = tile(0, cx);
+        let selected = |cx: &mut TestAppContext| cx.update(|cx| grid.read(cx).selected_ix());
+        let detail_open =
+            |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).detail.is_some());
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click(first.clone(), cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert!(detail_open(cx));
+
+        cx.update_window(window, |_, window, cx| {
+            window.press("right", cx);
+            window.press("right", cx);
+            window.press("f", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(selected(cx), Some(2));
+        let favorite = cx.update(|cx| grid.read(cx).images()[2].path().to_path_buf());
+        let root = cx.update(|cx| grid.read(cx).root().to_path_buf());
+        let favorites = Library::open(&root, &paths.database_file())
+            .unwrap()
+            .favorites()
+            .unwrap();
+        assert!(favorites.contains(&favorite));
+
+        cx.update_window(window, |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        assert!(!detail_open(cx));
+        assert_eq!(selected(cx), Some(2), "the grid keeps the last image shown");
+
+        // Focus is back in the grid, so arrow keys move its selection again.
+        cx.update_window(window, |_, window, cx| window.press("left", cx))
+            .unwrap();
+        assert_eq!(selected(cx), Some(1));
     }
 }
