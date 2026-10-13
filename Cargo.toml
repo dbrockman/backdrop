@@ -16,6 +16,7 @@ anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 imagesize = { version = "0.15", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"

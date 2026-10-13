@@ -657,8 +657,8 @@ The goal is a useful offline wallpaper browser.
 - [x] Recursive image discovery
 - [x] SQLite index, rebuildable from the library
 - [x] Content hashing and library metadata reconciliation
-- [ ] Asynchronous thumbnail generation and caching
-- [ ] Image grid
+- [x] Asynchronous thumbnail generation and caching
+- [x] Image grid
 - [ ] Image detail view
 - [ ] Filter by orientation and sort by date
 - [ ] Niri wallpaper integration

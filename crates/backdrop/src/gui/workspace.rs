@@ -6,8 +6,13 @@ use backdrop_core::settings::{LibraryStatus, Settings};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+
+use super::library_grid::LibraryGrid;
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
@@ -38,6 +43,8 @@ pub struct Workspace {
     scan: Scan,
     /// Dropping it discards the result of a scan that is no longer wanted.
     scan_task: Option<Task<()>>,
+    /// Shown once the first scan of the library has finished.
+    grid: Option<Entity<LibraryGrid>>,
     focus_handle: FocusHandle,
 }
 
@@ -70,6 +77,7 @@ impl Workspace {
             choosing: false,
             scan: Scan::Running,
             scan_task: None,
+            grid: None,
             focus_handle,
         }
     }
@@ -80,6 +88,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.grid = None;
         if let LibraryStatus::Available(root) = &status {
             self.scan_library(root.clone(), window, cx);
         }
@@ -102,7 +111,7 @@ impl Workspace {
                     match scan.metadata() {
                         Ok(metadata) if !metadata.unconfirmed_removals().is_empty() => {
                             let paths = metadata.unconfirmed_removals().to_vec();
-                            this.confirm_removals(root, paths, window, cx);
+                            this.confirm_removals(root.clone(), paths, window, cx);
                         }
                         Ok(_) => {}
                         Err(error) => window.push_notification(
@@ -112,6 +121,11 @@ impl Workspace {
                         ),
                     }
                 }
+                if let Ok(scan) = &result
+                    && scan.index().total() > 0
+                {
+                    this.show_grid(root.clone(), window, cx);
+                }
                 this.scan = match result {
                     Ok(scan) => Scan::Finished(Box::new(scan)),
                     Err(error) => Scan::Failed(error.to_string().into()),
@@ -120,6 +134,19 @@ impl Workspace {
             })
             .ok();
         }));
+    }
+
+    fn show_grid(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.grid {
+            Some(grid) => grid.update(cx, |grid, cx| grid.reload(cx)),
+            None => {
+                let paths = self.paths.clone();
+                let grid = cx.new(|cx| LibraryGrid::new(root, paths, cx));
+                let focus_handle = grid.read(cx).focus_handle().clone();
+                window.focus(&focus_handle, cx);
+                self.grid = Some(grid);
+            }
+        }
     }
 
     /// Asks before removing the metadata of many missing images at once. If
@@ -265,32 +292,57 @@ impl Workspace {
                 dir.display().to_string(),
                 Some(choose.primary().label("Choose Folder…")),
             ),
-            // Stands in for the image grid.
-            LibraryStatus::Available(dir) => empty_state(
-                dir.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| dir.display().to_string()),
-                self.scan_description(),
-                Some(choose.outline().label("Change Folder…")),
-            ),
-        }
-        .into_any_element()
-    }
-
-    fn scan_description(&self) -> SharedString {
-        match &self.scan {
-            Scan::Running => "Scanning…".into(),
-            Scan::Failed(message) => message.clone(),
-            Scan::Finished(summary) => {
-                let images = count(summary.index().total(), "image", "images");
-                match summary.index().issues().len() {
-                    0 => images.into(),
-                    skipped => {
-                        format!("{images} · {} skipped", count(skipped, "file", "files")).into()
-                    }
+            LibraryStatus::Available(_) => {
+                if let Some(grid) = &self.grid {
+                    return grid.clone().into_any_element();
+                }
+                match &self.scan {
+                    Scan::Running => empty_state("Scanning…", "", None),
+                    Scan::Failed(message) => empty_state(
+                        "Couldn't scan the library",
+                        message.clone(),
+                        Some(choose.outline().label("Change Folder…")),
+                    ),
+                    Scan::Finished(_) => empty_state(
+                        "No images in this folder",
+                        "Add JPEG, PNG, or WebP images to it or its subfolders.",
+                        Some(choose.outline().label("Change Folder…")),
+                    ),
                 }
             }
         }
+        .m_4()
+        .into_any_element()
+    }
+
+    /// The library folder's name and image count, for the title bar.
+    fn render_library_summary(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let LibraryState::Loaded(LibraryStatus::Available(dir)) = &self.library else {
+            return None;
+        };
+        let name = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.display().to_string());
+        let details = match &self.scan {
+            Scan::Running => Some("Scanning…".to_owned()),
+            Scan::Failed(_) => None,
+            Scan::Finished(scan) => {
+                let images = count(scan.index().total(), "image", "images");
+                Some(match scan.index().issues().len() {
+                    0 => images,
+                    skipped => format!("{images} · {} skipped", count(skipped, "file", "files")),
+                })
+            }
+        };
+        Some(
+            h_flex()
+                .gap_2()
+                .child(name)
+                .when_some(details, |row, details| {
+                    row.child(div().text_color(cx.theme().muted_foreground).child(details))
+                }),
+        )
     }
 }
 
@@ -334,14 +386,28 @@ impl Render for Workspace {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(TitleBar::new().child("Backdrop"))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .p_4()
-                    .child(self.render_library(cx)),
+                TitleBar::new()
+                    .child(
+                        self.render_library_summary(cx)
+                            .map(IntoElement::into_any_element)
+                            .unwrap_or_else(|| "Backdrop".into_any_element()),
+                    )
+                    .when(self.grid.is_some(), |bar| {
+                        bar.child(
+                            Button::new("change-library-folder")
+                                .ghost()
+                                .small()
+                                .mr_2()
+                                .label("Change Folder…")
+                                .loading(self.choosing)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_library_folder(window, cx)
+                                })),
+                        )
+                    }),
             )
+            .child(v_flex().flex_1().min_h_0().child(self.render_library(cx)))
     }
 }
 
