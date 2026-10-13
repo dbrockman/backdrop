@@ -15,6 +15,11 @@ use image::{ImageFormat, Rgb, RgbImage};
 pub struct FakeProvider {
     pages: Vec<Vec<&'static str>>,
     searches: Mutex<Vec<SearchQuery>>,
+    api_key: Mutex<Option<String>>,
+    /// Keys `verify_api_key` rejects.
+    rejected_keys: Vec<&'static str>,
+    /// Whether `verify_api_key` fails as if the network were down.
+    offline: bool,
 }
 
 impl FakeProvider {
@@ -22,7 +27,24 @@ impl FakeProvider {
         Self {
             pages,
             searches: Mutex::new(Vec::new()),
+            api_key: Mutex::new(None),
+            rejected_keys: Vec::new(),
+            offline: false,
         }
+    }
+
+    pub fn rejecting(mut self, key: &'static str) -> Self {
+        self.rejected_keys.push(key);
+        self
+    }
+
+    pub fn offline(mut self) -> Self {
+        self.offline = true;
+        self
+    }
+
+    pub fn api_key(&self) -> Option<String> {
+        self.api_key.lock().unwrap().clone()
     }
 
     pub fn searches(&self) -> Vec<SearchQuery> {
@@ -97,6 +119,27 @@ impl Provider for FakeProvider {
         to: &mut dyn Write,
     ) -> Result<u64, ProviderError> {
         self.download(wallpaper, to, &mut |_, _| {})
+    }
+
+    fn has_api_key(&self) -> bool {
+        self.api_key().is_some()
+    }
+
+    fn set_api_key(&self, api_key: Option<String>) {
+        *self.api_key.lock().unwrap() = api_key;
+    }
+
+    fn verify_api_key(&self, api_key: &str) -> Result<(), ProviderError> {
+        if self.offline {
+            return Err(ProviderError::Status {
+                provider: "Fake",
+                status: 503,
+            });
+        }
+        if self.rejected_keys.contains(&api_key) {
+            return Err(ProviderError::ApiKeyRejected { provider: "Fake" });
+        }
+        Ok(())
     }
 
     fn file_name(&self, id: &str, extension: &str) -> String {

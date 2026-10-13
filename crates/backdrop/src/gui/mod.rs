@@ -1,10 +1,9 @@
 //! Graphical interface. Presentation only; behavior comes from `backdrop_core`.
 
+mod api_key_form;
 mod image_cache;
 mod image_detail;
 mod library_grid;
-#[cfg(test)]
-mod test_provider;
 mod tiles;
 mod wallhaven_browser;
 mod workspace;

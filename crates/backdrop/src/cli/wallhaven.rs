@@ -9,7 +9,8 @@ use backdrop_core::library::{Downloaded, ImageSource};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::providers::wallhaven::RATE_LIMIT;
 use backdrop_core::providers::{
-    ContentRating, Provider, ProviderError, RemoteWallpaper, SearchQuery, SearchSort, Wallhaven,
+    ContentRating, KeyCheck, Provider, ProviderError, RemoteWallpaper, SearchQuery, SearchSort,
+    Wallhaven, check_api_key,
 };
 use backdrop_core::settings::Settings;
 use clap::{Args, Subcommand, ValueEnum};
@@ -56,7 +57,9 @@ pub enum WallhavenCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ApiKeyCommand {
-    /// Store an API key, from your Wallhaven account settings.
+    /// Check an API key, from your Wallhaven account settings, and store it.
+    /// A key Wallhaven rejects is not stored; one that can't be checked, for
+    /// example offline, is stored with a warning.
     Set {
         /// The key; read from standard input if left out, which keeps it out
         /// of shell history.
@@ -206,14 +209,7 @@ pub fn run(paths: &AppPaths, command: WallhavenCommand) -> anyhow::Result<()> {
                 Some(key) => key,
                 None => read_key()?,
             };
-            if key.trim().is_empty() {
-                bail!("the API key is empty");
-            }
-            Settings::update(settings_file, |settings| {
-                settings.set_wallhaven_api_key(Some(&key));
-                Ok(())
-            })?;
-            Ok(())
+            save_api_key(settings_file, &Wallhaven::new(None), &key)
         }
         WallhavenCommand::ApiKey {
             command: Some(ApiKeyCommand::Clear),
@@ -225,6 +221,26 @@ pub fn run(paths: &AppPaths, command: WallhavenCommand) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Checks `key` with `provider` and stores it, unless the provider rejects it.
+fn save_api_key(settings_file: &Path, provider: &dyn Provider, key: &str) -> anyhow::Result<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        bail!("the API key is empty");
+    }
+    match check_api_key(provider, key) {
+        Ok(KeyCheck::Accepted) => {}
+        Ok(KeyCheck::Unchecked(error)) => {
+            eprintln!("warning: saved the key without checking it: {error}")
+        }
+        Err(error) => bail!("{error}; it was not saved"),
+    }
+    Settings::update(settings_file, |settings| {
+        settings.set_wallhaven_api_key(Some(key));
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn read_key() -> anyhow::Result<String> {
@@ -520,6 +536,7 @@ mod tests {
 
     use super::super::{Args, Command};
     use super::*;
+    use crate::test_provider::FakeProvider;
 
     fn search_args(args: &[&str]) -> SearchArgs {
         let args =
@@ -643,6 +660,29 @@ mod tests {
     }
 
     #[test]
+    fn rejected_api_keys_are_not_saved() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("settings.toml");
+        let provider = FakeProvider::new(Vec::new()).rejecting("wrong");
+
+        let error = save_api_key(&file, &provider, "wrong").unwrap_err();
+
+        assert!(error.to_string().contains("not saved"), "{error}");
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn api_keys_that_cannot_be_checked_are_saved() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("settings.toml");
+
+        save_api_key(&file, &FakeProvider::new(Vec::new()).offline(), "abc123").unwrap();
+
+        let settings = Settings::load(&file).unwrap();
+        assert_eq!(settings.wallhaven_api_key(), Some("abc123"));
+    }
+
+    #[test]
     fn api_key_set_and_clear_change_the_settings() {
         let temp = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(temp.path(), temp.path(), temp.path());
@@ -651,13 +691,7 @@ mod tests {
             command: Some(command),
         };
 
-        run(
-            &paths,
-            api_key(ApiKeyCommand::Set {
-                key: Some("abc123".to_owned()),
-            }),
-        )
-        .unwrap();
+        save_api_key(&file, &FakeProvider::new(Vec::new()), " abc123\n").unwrap();
         assert_eq!(
             Settings::load(&file).unwrap().wallhaven_api_key(),
             Some("abc123")

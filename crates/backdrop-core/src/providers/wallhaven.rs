@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read as _, Write};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -63,7 +63,9 @@ const RATINGS: [ContentRating; 3] = [
 pub struct Wallhaven {
     agent: ureq::Agent,
     api_url: String,
-    api_key: Option<String>,
+    /// Changeable while the client is in use, so one client and its rate
+    /// limit serve the whole application.
+    api_key: RwLock<Option<String>>,
     /// When recent API requests were sent, or are due to be sent.
     sent: Mutex<VecDeque<Instant>>,
 }
@@ -85,18 +87,35 @@ impl Wallhaven {
         Self {
             agent: config.into(),
             api_url: api_url.into(),
-            api_key: api_key.filter(|key| !key.is_empty()),
+            api_key: RwLock::new(api_key.filter(|key| !key.is_empty())),
             sent: Mutex::new(VecDeque::new()),
         }
     }
 
-    /// Sends an API request and checks its status. Requests beyond Wallhaven's
-    /// rate limit wait until they are allowed, so a batch, such as linking a
-    /// whole library, slows down rather than fails.
+    fn current_api_key(&self) -> Option<String> {
+        self.api_key
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Sends an API request with the current API key and checks its status.
     fn get(
         &self,
         path: &str,
         query: &[(&str, String)],
+    ) -> Result<Response<ureq::Body>, ProviderError> {
+        self.get_with_key(path, query, self.current_api_key().as_deref())
+    }
+
+    /// Sends an API request authenticated with `api_key` and checks its status.
+    /// Requests beyond Wallhaven's rate limit wait until they are allowed, so a
+    /// batch, such as linking a whole library, slows down rather than fails.
+    fn get_with_key(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        api_key: Option<&str>,
     ) -> Result<Response<ureq::Body>, ProviderError> {
         let delay = {
             let mut sent = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
@@ -110,13 +129,13 @@ impl Wallhaven {
             .agent
             .get(format!("{}{path}", self.api_url))
             .query_pairs(query.iter().map(|(key, value)| (*key, value.as_str())));
-        if let Some(key) = &self.api_key {
+        if let Some(key) = api_key {
             request = request.header("X-API-Key", key);
         }
         let response = request.call().map_err(network_error)?;
         match response.status().as_u16() {
             200..=299 => Ok(response),
-            401 if self.api_key.is_some() => Err(ProviderError::ApiKeyRejected { provider: NAME }),
+            401 if api_key.is_some() => Err(ProviderError::ApiKeyRejected { provider: NAME }),
             401 => Err(ProviderError::ApiKeyRequired { provider: NAME }),
             429 => Err(ProviderError::RateLimited { provider: NAME }),
             status => Err(ProviderError::Status {
@@ -206,7 +225,7 @@ impl Provider for Wallhaven {
 
     fn search(&self, query: &SearchQuery) -> Result<SearchPage, ProviderError> {
         let ratings = query.effective_ratings();
-        if ratings.contains(&ContentRating::Nsfw) && self.api_key.is_none() {
+        if ratings.contains(&ContentRating::Nsfw) && !self.has_api_key() {
             return Err(ProviderError::ApiKeyRequired { provider: NAME });
         }
         let response: SearchResponse = self.get_json("/search", &search_params(query)?)?;
@@ -259,6 +278,27 @@ impl Provider for Wallhaven {
         to: &mut dyn Write,
     ) -> Result<u64, ProviderError> {
         self.fetch_file(&wallpaper.thumbnail_url, &wallpaper.id, to, &mut |_, _| {})
+    }
+
+    fn has_api_key(&self) -> bool {
+        self.current_api_key().is_some()
+    }
+
+    fn set_api_key(&self, api_key: Option<String>) {
+        *self.api_key.write().unwrap_or_else(PoisonError::into_inner) =
+            api_key.filter(|key| !key.is_empty());
+    }
+
+    /// Asks for the account settings, which only a valid key can read.
+    /// Wallhaven answers an unknown key with 404 rather than 401.
+    fn verify_api_key(&self, api_key: &str) -> Result<(), ProviderError> {
+        match self.get_with_key("/settings", &[], Some(api_key)) {
+            Ok(_) => Ok(()),
+            Err(ProviderError::Status { status: 404, .. }) => {
+                Err(ProviderError::ApiKeyRejected { provider: NAME })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn file_name(&self, id: &str, extension: &str) -> String {
@@ -838,6 +878,59 @@ mod tests {
         let request = &server.requests()[1];
         assert_eq!(request.target, "/full/ly/wallhaven-lygg6r.jpg");
         assert_eq!(request.header("x-api-key"), None);
+    }
+
+    #[test]
+    fn api_keys_are_verified_without_being_used() {
+        let server = TestServer::start(vec![
+            (200, br#"{"data":{"purity":["sfw"]}}"#.to_vec()),
+            (404, br#"{"error":"Nothing here"}"#.to_vec()),
+            (401, br#"{"error":"Unauthorized"}"#.to_vec()),
+            (503, Vec::new()),
+        ]);
+        let wallhaven = Wallhaven::with_api_url(server.url(), None);
+
+        assert!(wallhaven.verify_api_key("good").is_ok());
+        assert!(matches!(
+            wallhaven.verify_api_key("unknown"),
+            Err(ProviderError::ApiKeyRejected { .. })
+        ));
+        assert!(matches!(
+            wallhaven.verify_api_key("revoked"),
+            Err(ProviderError::ApiKeyRejected { .. })
+        ));
+        assert!(matches!(
+            wallhaven.verify_api_key("good"),
+            Err(ProviderError::Status { status: 503, .. })
+        ));
+        assert!(!wallhaven.has_api_key());
+        let requests = server.requests();
+        assert_eq!(requests[0].target, "/settings");
+        assert_eq!(requests[0].header("x-api-key"), Some("good"));
+    }
+
+    #[test]
+    fn the_api_key_can_change_while_the_client_is_in_use() {
+        let server = TestServer::start(vec![
+            (200, search_response(&[])),
+            (200, search_response(&[])),
+        ]);
+        let wallhaven = Wallhaven::with_api_url(server.url(), None);
+        let nsfw = SearchQuery {
+            ratings: vec![ContentRating::Nsfw],
+            ..SearchQuery::default()
+        };
+        assert!(wallhaven.search(&nsfw).is_err());
+
+        wallhaven.set_api_key(Some("secret".to_owned()));
+        wallhaven.search(&nsfw).unwrap();
+        wallhaven.set_api_key(Some(String::new()));
+        assert!(!wallhaven.has_api_key());
+        wallhaven.search(&SearchQuery::default()).unwrap();
+
+        let requests = server.requests();
+        assert_eq!(requests[0].header("x-api-key"), Some("secret"));
+        assert_eq!(requests[1].header("x-api-key"), None);
     }
 
     #[test]

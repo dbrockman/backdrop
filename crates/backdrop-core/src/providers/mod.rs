@@ -292,6 +292,26 @@ impl RemoteWallpaper {
     }
 }
 
+/// The outcome of [`check_api_key`] for a key worth saving.
+#[derive(Debug)]
+pub enum KeyCheck {
+    Accepted,
+    /// The provider couldn't be asked, for example while offline. The key
+    /// may still be right, so it is worth keeping.
+    Unchecked(ProviderError),
+}
+
+/// Checks `api_key` with `provider` before it is saved. Only a key the
+/// provider rejects is an error; one that couldn't be checked is kept, so
+/// setting a key works offline.
+pub fn check_api_key(provider: &dyn Provider, api_key: &str) -> Result<KeyCheck, ProviderError> {
+    match provider.verify_api_key(api_key) {
+        Ok(()) => Ok(KeyCheck::Accepted),
+        Err(error @ ProviderError::ApiKeyRejected { .. }) => Err(error),
+        Err(error) => Ok(KeyCheck::Unchecked(error)),
+    }
+}
+
 /// Download progress: bytes received so far, and the total if known.
 pub type Progress<'a> = &'a mut dyn FnMut(u64, Option<u64>);
 
@@ -322,6 +342,22 @@ pub trait Provider: Send + Sync {
         to: &mut dyn Write,
         progress: Progress,
     ) -> Result<u64, ProviderError>;
+
+    /// Whether requests are authenticated with an API key.
+    fn has_api_key(&self) -> bool {
+        false
+    }
+
+    /// Authenticates later requests with `api_key`, or with none. Providers
+    /// without keys ignore it.
+    fn set_api_key(&self, _api_key: Option<String>) {}
+
+    /// Checks with the provider that it accepts `api_key`, without using it
+    /// for other requests. [`ProviderError::ApiKeyRejected`] means it doesn't;
+    /// any other error means the key couldn't be checked.
+    fn verify_api_key(&self, _api_key: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
 
     /// The file name a download of wallpaper `id` is saved as, with the
     /// extension of its format, such as `jpg`.

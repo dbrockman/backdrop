@@ -206,6 +206,8 @@ The application should respect the filtering and authentication capabilities of 
 
 API keys and other credentials must not be stored in Git-synchronized metadata.
 
+A key is checked with the provider before it is saved, from the GUI (an API key dialog on the Wallhaven page) or the CLI (`backdrop wallhaven api-key set`). A key the provider rejects is not saved; one that can't be checked, for example offline, is saved with a warning. A saved key is never displayed again.
+
 ### 3.4 Detecting previously downloaded wallpapers
 
 Backdrop should recognize when a remote wallpaper already exists in the local library.
@@ -707,7 +709,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Snapshot provider metadata into the library
 - [ ] Display provider tags
 - [x] Search and browse Wallhaven
-- [ ] API-key configuration
+- [x] API-key configuration
 - [ ] SFW/NSFW filtering
 - [x] Download original images
 - [ ] Detect already-downloaded images

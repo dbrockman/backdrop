@@ -118,12 +118,14 @@ impl Workspace {
         let settings_file = paths.settings_file();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    Settings::load(&settings_file).map(|settings| settings.library_status())
-                })
+                .background_spawn(async move { Settings::load(&settings_file) })
                 .await;
             this.update_in(cx, |this, window, cx| match result {
-                Ok(status) => this.set_library_status(status, window, cx),
+                Ok(settings) => {
+                    let key = settings.wallhaven_api_key().map(str::to_owned);
+                    this.provider.set_api_key(key);
+                    this.set_library_status(settings.library_status(), window, cx)
+                }
                 Err(error) => {
                     this.library = LibraryState::Unreadable(error.to_string().into());
                     cx.notify();
@@ -230,8 +232,17 @@ impl Workspace {
         let provider = self.provider.clone();
         let location = self.library_location();
         let thumbnails_dir = self.paths.remote_thumbnails_dir();
-        let browser =
-            cx.new(|cx| WallhavenBrowser::new(provider, location, thumbnails_dir, window, cx));
+        let settings_file = self.paths.settings_file();
+        let browser = cx.new(|cx| {
+            WallhavenBrowser::new(
+                provider,
+                location,
+                thumbnails_dir,
+                settings_file,
+                window,
+                cx,
+            )
+        });
         self._wallhaven_subscription = Some(cx.subscribe_in(
             &browser,
             window,
@@ -746,7 +757,7 @@ mod tests {
                 Workspace::new(
                     window_paths,
                     || None,
-                    std::sync::Arc::new(super::super::test_provider::FakeProvider::new(Vec::new())),
+                    std::sync::Arc::new(crate::test_provider::FakeProvider::new(Vec::new())),
                     window,
                     cx,
                 )

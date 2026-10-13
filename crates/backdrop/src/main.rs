@@ -1,6 +1,8 @@
 mod cli;
 mod format;
 mod gui;
+#[cfg(test)]
+mod test_provider;
 
 use backdrop_core::paths::AppPaths;
 use clap::Parser as _;

@@ -36,6 +36,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::api_key_form::{ApiKeyChanged, ApiKeyForm};
 use super::image_cache::LruImageCache;
 use super::library_grid::{SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp};
 use super::tiles::{self, GAP, PADDING};
@@ -113,6 +114,7 @@ impl DownloadProgress {
 pub struct WallhavenBrowser {
     provider: Arc<dyn Provider>,
     library: Option<LibraryLocation>,
+    settings_file: PathBuf,
     thumbnail_cache: RemoteThumbnails,
     query_input: Entity<InputState>,
     query: SearchQuery,
@@ -140,6 +142,7 @@ pub struct WallhavenBrowser {
     focus_handle: FocusHandle,
     image_cache: Entity<LruImageCache>,
     _query_subscription: Subscription,
+    _api_key_subscription: Option<Subscription>,
     _search_task: Option<Task<()>>,
     _thumbnail_task: Option<Task<()>>,
     _library_task: Option<Task<()>>,
@@ -152,6 +155,7 @@ impl WallhavenBrowser {
         provider: Arc<dyn Provider>,
         library: Option<LibraryLocation>,
         thumbnails_dir: PathBuf,
+        settings_file: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -170,6 +174,7 @@ impl WallhavenBrowser {
         let mut browser = Self {
             provider,
             library,
+            settings_file,
             thumbnail_cache: RemoteThumbnails::new(thumbnails_dir),
             query_input,
             query: SearchQuery::default(),
@@ -189,6 +194,7 @@ impl WallhavenBrowser {
             focus_handle: cx.focus_handle(),
             image_cache: LruImageCache::new(DECODED_THUMBNAILS, cx),
             _query_subscription: query_subscription,
+            _api_key_subscription: None,
             _search_task: None,
             _thumbnail_task: None,
             _library_task: None,
@@ -445,6 +451,35 @@ impl WallhavenBrowser {
         window.focus(&focus_handle, cx);
     }
 
+    /// Opens the dialog for the API key, with its field focused.
+    pub fn open_api_key_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let provider = self.provider.clone();
+        let settings_file = self.settings_file.clone();
+        let form = cx.new(|cx| ApiKeyForm::new(provider, settings_file, window, cx));
+        // The toolbar button names whether a key is set.
+        self._api_key_subscription =
+            Some(cx.subscribe(&form, |_, _, _: &ApiKeyChanged, cx| cx.notify()));
+        let title: SharedString = format!("{} API key", self.provider.name()).into();
+        // The builder can run again when the dialog layer is rebuilt; focus the
+        // field only the first time.
+        let initial_focus = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                let focus_handle = form.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+            }
+            let save = form.clone();
+            dialog
+                .title(title.clone())
+                .child(form.clone())
+                // Enter saves; the dialog stays open until the key is saved.
+                .on_ok(move |_, window, cx| {
+                    save.update(cx, |form, cx| form.save(window, cx));
+                    false
+                })
+        });
+    }
+
     /// Downloads the selected wallpaper into the library, into the folder its
     /// download rules choose.
     pub fn download_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -660,6 +695,19 @@ impl WallhavenBrowser {
                         .child(count),
                 )
             })
+            .child(
+                Button::new("api-key")
+                    .ghost()
+                    .small()
+                    .label(if self.provider.has_api_key() {
+                        "API Key…"
+                    } else {
+                        "Add API Key…"
+                    })
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_api_key_dialog(window, cx)),
+                    ),
+            )
             .child(
                 Button::new("wallhaven-sort")
                     .ghost()
@@ -962,16 +1010,18 @@ mod tests {
     use backdrop_core::library::Library;
     use backdrop_core::paths::AppPaths;
     use backdrop_core::providers::ContentRating;
+    use backdrop_core::settings::Settings;
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::super::test_provider::FakeProvider;
     use super::{LibraryChanged, LibraryLocation, WallhavenBrowser};
+    use crate::test_provider::FakeProvider;
 
     struct Fixture {
         _dir: tempfile::TempDir,
         root: PathBuf,
+        settings_file: PathBuf,
         provider: Arc<FakeProvider>,
         window: AnyWindowHandle,
         browser: Entity<WallhavenBrowser>,
@@ -983,6 +1033,14 @@ mod tests {
     /// that already holds `existing` images.
     fn open_browser(
         pages: Vec<Vec<&'static str>>,
+        existing: &[&str],
+        cx: &mut TestAppContext,
+    ) -> Fixture {
+        open_browser_with(FakeProvider::new(pages), existing, cx)
+    }
+
+    fn open_browser_with(
+        provider: FakeProvider,
         existing: &[&str],
         cx: &mut TestAppContext,
     ) -> Fixture {
@@ -1001,7 +1059,8 @@ mod tests {
             .unwrap()
             .scan()
             .unwrap();
-        let provider = Arc::new(FakeProvider::new(pages));
+        let provider = Arc::new(provider);
+        let settings_file = paths.settings_file();
         let location = LibraryLocation {
             root: root.clone(),
             database: paths.database_file(),
@@ -1021,6 +1080,7 @@ mod tests {
                     window_provider,
                     Some(location),
                     paths.remote_thumbnails_dir(),
+                    paths.settings_file(),
                     window,
                     cx,
                 )
@@ -1045,6 +1105,7 @@ mod tests {
         Fixture {
             _dir: dir,
             root,
+            settings_file,
             provider,
             window,
             browser,
@@ -1144,5 +1205,78 @@ mod tests {
             cx.update(|cx| fixture.browser.read(cx).selected_ix()),
             Some(0)
         );
+    }
+    /// Opens the API key dialog from the toolbar and types `key` into it.
+    fn enter_api_key(fixture: &Fixture, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.click("api-key", cx);
+            window.render_frame(cx);
+            window.input(key, cx);
+        })
+        .unwrap();
+    }
+
+    fn dialog_is_open(fixture: &Fixture, cx: &mut TestAppContext) -> bool {
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("api-key-input").is_some()
+        })
+        .unwrap()
+    }
+
+    fn saved_key(fixture: &Fixture) -> Option<String> {
+        Settings::load(&fixture.settings_file)
+            .unwrap()
+            .wallhaven_api_key()
+            .map(str::to_owned)
+    }
+
+    #[gpui_kit::test]
+    fn an_accepted_api_key_is_saved_and_used(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+
+        enter_api_key(&fixture, "abc123", cx);
+        press(&fixture, "enter", cx);
+
+        assert_eq!(saved_key(&fixture).as_deref(), Some("abc123"));
+        assert_eq!(fixture.provider.api_key().as_deref(), Some("abc123"));
+        assert!(!dialog_is_open(&fixture, cx));
+    }
+
+    #[gpui_kit::test]
+    fn a_rejected_api_key_stays_in_the_dialog(cx: &mut TestAppContext) {
+        let provider = FakeProvider::new(vec![vec!["aaa111"]]).rejecting("wrong");
+        let fixture = open_browser_with(provider, &[], cx);
+
+        enter_api_key(&fixture, "wrong", cx);
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.click("save-api-key", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(saved_key(&fixture), None);
+        assert_eq!(fixture.provider.api_key(), None);
+        assert!(dialog_is_open(&fixture, cx));
+    }
+
+    #[gpui_kit::test]
+    fn a_saved_api_key_can_be_removed(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+        enter_api_key(&fixture, "abc123", cx);
+        press(&fixture, "enter", cx);
+
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("api-key", cx);
+            window.render_frame(cx);
+            window.click("remove-api-key", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(saved_key(&fixture), None);
+        assert_eq!(fixture.provider.api_key(), None);
+        assert!(!dialog_is_open(&fixture, cx));
     }
 }
