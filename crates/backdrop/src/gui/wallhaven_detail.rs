@@ -231,6 +231,20 @@ impl WallhavenDetail {
         }
     }
 
+    /// Downloads the shown wallpaper, from its full image when that has
+    /// loaded, so it isn't downloaded twice.
+    fn download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cached = match (self.shown(cx), &self.preview) {
+            (Some(shown), Some((id, Preview::Ready(file)))) if shown.id() == id => {
+                Some(file.to_path_buf())
+            }
+            _ => None,
+        };
+        self.browser.update(cx, |browser, cx| {
+            browser.download_selected_from(cached, window, cx)
+        });
+    }
+
     fn step(&mut self, offset: isize, cx: &mut Context<Self>) {
         self.browser
             .update(cx, |browser, cx| browser.move_selection(offset, cx));
@@ -320,10 +334,7 @@ impl WallhavenDetail {
                 } else {
                     "Choose a library folder to download into"
                 })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.browser
-                        .update(cx, |browser, cx| browser.download_selected(window, cx))
-                }))
+                .on_click(cx.listener(|this, _, window, cx| this.download(window, cx)))
         };
 
         let theme = cx.theme();
@@ -444,10 +455,9 @@ impl Render for WallhavenDetail {
             .on_action(cx.listener(|_, _: &Back, _, cx| cx.emit(BackToResults)))
             .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &NextImage, _, cx| this.step(1, cx)))
-            .on_action(cx.listener(|this, _: &DownloadSelected, window, cx| {
-                this.browser
-                    .update(cx, |browser, cx| browser.download_selected(window, cx))
-            }))
+            .on_action(
+                cx.listener(|this, _: &DownloadSelected, window, cx| this.download(window, cx)),
+            )
             .size_full()
             .items_stretch()
             .map(|view| match shown {

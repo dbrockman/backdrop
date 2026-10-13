@@ -6,7 +6,7 @@
 //! existing file. Then the provider snapshot and the metadata record linking
 //! the image to its source are written, and the library is scanned.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,32 @@ impl Library {
         folder: Option<&Path>,
         progress: Progress,
     ) -> Result<Downloaded, LibraryError> {
+        self.save_original(provider, wallpaper, folder, None, progress)
+    }
+
+    /// Like [`Library::download`], but takes the original from `cached`, a
+    /// complete copy downloaded earlier, such as the preview of the detail
+    /// view, instead of downloading it again. If that file is gone, the
+    /// original is downloaded. The copy is checked like a download.
+    pub fn download_cached(
+        &mut self,
+        provider: &dyn Provider,
+        wallpaper: &RemoteWallpaper,
+        folder: Option<&Path>,
+        cached: &Path,
+        progress: Progress,
+    ) -> Result<Downloaded, LibraryError> {
+        self.save_original(provider, wallpaper, folder, Some(cached), progress)
+    }
+
+    fn save_original(
+        &mut self,
+        provider: &dyn Provider,
+        wallpaper: &RemoteWallpaper,
+        folder: Option<&Path>,
+        cached: Option<&Path>,
+        progress: Progress,
+    ) -> Result<Downloaded, LibraryError> {
         if let Some(path) = self.find_source(provider, wallpaper.id())? {
             return Ok(Downloaded::AlreadyInLibrary(path));
         }
@@ -94,7 +120,21 @@ impl Library {
             .tempfile_in(&dir)
             .map_err(write_error)?;
         let mut writer = BufWriter::new(temp.as_file_mut());
-        provider.download(wallpaper, &mut writer, progress)?;
+        // A cache can lose the file at any time; then it is downloaded instead.
+        match cached.and_then(|cached| Some((cached, File::open(cached).ok()?))) {
+            Some((cached, mut original)) => {
+                let copied = io::copy(&mut original, &mut writer).map_err(|cause| {
+                    LibraryError::Download {
+                        path: cached.to_path_buf(),
+                        cause,
+                    }
+                })?;
+                progress(copied, Some(copied));
+            }
+            None => {
+                provider.download(wallpaper, &mut writer, progress)?;
+            }
+        }
         writer.flush().map_err(write_error)?;
         drop(writer);
         temp.as_file().sync_all().map_err(write_error)?;
@@ -174,6 +214,7 @@ mod tests {
         /// Ids whose download fails halfway.
         failing: Vec<String>,
         detail_requests: Mutex<usize>,
+        downloads: Mutex<usize>,
     }
 
     impl FakeProvider {
@@ -226,6 +267,7 @@ mod tests {
             progress: Progress,
         ) -> Result<u64, ProviderError> {
             let bytes = &self.images[wallpaper.id()];
+            *self.downloads.lock().unwrap() += 1;
             if self.failing.iter().any(|id| id == wallpaper.id()) {
                 to.write_all(&bytes[..bytes.len() / 2]).unwrap();
                 return Err(ProviderError::Status {
@@ -341,6 +383,65 @@ mod tests {
             .unwrap();
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].path(), Path::new("fake-abc123.png"));
+    }
+
+    #[test]
+    fn a_cached_original_is_saved_without_downloading_it_again() {
+        let mut fixture = Fixture::new();
+        let provider = FakeProvider::with(&[("abc123", png(20, 10, 2))]);
+        let cached = fixture.dir.path().join("abc123.preview");
+        fs::write(&cached, png(20, 10, 1)).unwrap();
+        let wallpaper = RemoteWallpaper::for_test("fake", "abc123");
+
+        let downloaded = fixture
+            .library
+            .download_cached(
+                &provider,
+                &wallpaper,
+                Some(Path::new("")),
+                &cached,
+                &mut |_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(
+            downloaded,
+            Downloaded::Saved(PathBuf::from("fake-abc123.png"))
+        );
+        assert_eq!(
+            fs::read(fixture.root().join("fake-abc123.png")).unwrap(),
+            png(20, 10, 1)
+        );
+        assert_eq!(*provider.downloads.lock().unwrap(), 0);
+        assert!(cached.exists(), "the cache keeps its copy");
+        let metadata = LibraryMetadata::load(fixture.root()).unwrap();
+        let record = metadata.get(Path::new("fake-abc123.png")).unwrap();
+        assert_eq!(record.source(), Some("fake/abc123"));
+    }
+
+    #[test]
+    fn a_cached_original_that_is_gone_is_downloaded() {
+        let mut fixture = Fixture::new();
+        let provider = FakeProvider::with(&[("abc123", png(20, 10, 2))]);
+        let cached = fixture.dir.path().join("pruned.preview");
+        let wallpaper = RemoteWallpaper::for_test("fake", "abc123");
+
+        fixture
+            .library
+            .download_cached(
+                &provider,
+                &wallpaper,
+                Some(Path::new("")),
+                &cached,
+                &mut |_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read(fixture.root().join("fake-abc123.png")).unwrap(),
+            png(20, 10, 2)
+        );
+        assert_eq!(*provider.downloads.lock().unwrap(), 1);
     }
 
     #[test]

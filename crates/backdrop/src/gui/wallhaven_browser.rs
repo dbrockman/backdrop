@@ -546,6 +546,17 @@ impl WallhavenBrowser {
     /// Downloads the selected wallpaper into the library, into the folder its
     /// download rules choose.
     pub fn download_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.download_selected_from(None, window, cx)
+    }
+
+    /// Like [`Self::download_selected`], taking the original from `cached`, a
+    /// complete copy such as the detail view's full image, when one is given.
+    pub fn download_selected_from(
+        &mut self,
+        cached: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(library) = self.library.clone() else {
             return;
         };
@@ -567,17 +578,23 @@ impl WallhavenBrowser {
             let result = cx
                 .background_spawn(async move {
                     let mut library = Library::open(&library.root, &library.database)?;
-                    library.download(
-                        provider.as_ref(),
-                        &wallpaper,
-                        None,
-                        &mut |received, total| {
-                            progress.received.store(received, Ordering::Relaxed);
-                            progress
-                                .total
-                                .store(total.unwrap_or(u64::MAX), Ordering::Relaxed);
-                        },
-                    )
+                    let mut report = |received, total: Option<u64>| {
+                        progress.received.store(received, Ordering::Relaxed);
+                        progress
+                            .total
+                            .store(total.unwrap_or(u64::MAX), Ordering::Relaxed);
+                    };
+                    let provider = provider.as_ref();
+                    match cached {
+                        Some(cached) => library.download_cached(
+                            provider,
+                            &wallpaper,
+                            None,
+                            &cached,
+                            &mut report,
+                        ),
+                        None => library.download(provider, &wallpaper, None, &mut report),
+                    }
                 })
                 .await;
             this.update_in(cx, |browser, window, cx| {

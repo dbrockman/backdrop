@@ -800,6 +800,7 @@ impl Render for Workspace {
 mod tests {
     use backdrop_core::library::Library;
     use backdrop_core::paths::AppPaths;
+    use backdrop_core::settings::LibraryStatus;
     use backdrop_core::settings::Settings;
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt as _;
@@ -1086,5 +1087,38 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert_eq!(previews, ["ccc333.preview"]);
+    }
+    #[gpui_kit::test]
+    fn downloading_from_the_detail_view_reuses_its_full_image(cx: &mut TestAppContext) {
+        let provider = std::sync::Arc::new(crate::test_provider::FakeProvider::new(vec![vec![
+            "aaa111",
+        ]]));
+        let (_dir, _paths, window, workspace) =
+            open_workspace_with(&[], Vec::new(), Some(provider.clone()), cx);
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("wallpaper-aaa111", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(provider.downloads(), 1, "the full image for the preview");
+
+        cx.update_window(window, |_, window, cx| window.press("d", cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        let root = cx.update(|cx| match &workspace.read(cx).library {
+            super::LibraryState::Loaded(LibraryStatus::Available(root)) => root.clone(),
+            _ => panic!("no library"),
+        });
+        assert!(root.join("fake-aaa111.png").is_file());
+        assert_eq!(provider.downloads(), 1, "no second download");
     }
 }

@@ -17,6 +17,8 @@ pub struct FakeProvider {
     searches: Mutex<Vec<SearchQuery>>,
     /// Ids whose details were requested, in order.
     details: Mutex<Vec<String>>,
+    /// How many originals were downloaded; thumbnails don't count.
+    downloads: Mutex<usize>,
     api_key: Mutex<Option<String>>,
     /// Keys `verify_api_key` rejects.
     rejected_keys: Vec<&'static str>,
@@ -30,6 +32,7 @@ impl FakeProvider {
             pages,
             searches: Mutex::new(Vec::new()),
             details: Mutex::new(Vec::new()),
+            downloads: Mutex::new(0),
             api_key: Mutex::new(None),
             rejected_keys: Vec::new(),
             offline: false,
@@ -56,6 +59,10 @@ impl FakeProvider {
 
     pub fn detail_requests(&self) -> Vec<String> {
         self.details.lock().unwrap().clone()
+    }
+
+    pub fn downloads(&self) -> usize {
+        *self.downloads.lock().unwrap()
     }
 }
 
@@ -115,6 +122,7 @@ impl Provider for FakeProvider {
         to: &mut dyn Write,
         progress: Progress,
     ) -> Result<u64, ProviderError> {
+        *self.downloads.lock().unwrap() += 1;
         let image = png();
         to.write_all(&image).map_err(ProviderError::Write)?;
         progress(image.len() as u64, Some(image.len() as u64));
@@ -123,10 +131,12 @@ impl Provider for FakeProvider {
 
     fn download_thumbnail(
         &self,
-        wallpaper: &RemoteWallpaper,
+        _: &RemoteWallpaper,
         to: &mut dyn Write,
     ) -> Result<u64, ProviderError> {
-        self.download(wallpaper, to, &mut |_, _| {})
+        let image = png();
+        to.write_all(&image).map_err(ProviderError::Write)?;
+        Ok(image.len() as u64)
     }
 
     fn has_api_key(&self) -> bool {
