@@ -189,6 +189,7 @@ Users should be able to:
 - Filter by orientation, aspect ratio, and resolution
 - Sort using supported provider options
 - View wallpaper details and tags
+- Search for a tag by clicking it in a wallpaper's details, which shows the results for that tag
 - Download original files directly into their configured library
 - Open wallpapers on wallhaven.cc
 
@@ -721,6 +722,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Download original images
 - [x] Detect already-downloaded images
 - [x] Download destination rules
+- [ ] Click a tag in the Wallhaven details view to search for that tag
 
 ### Phase 3 — Organization and Git
 
