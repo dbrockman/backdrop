@@ -644,8 +644,8 @@ The goal is a useful offline wallpaper browser.
 
 - [x] Rust application setup with GPUI and GPUI Kit
 - [x] Settings persistence and library directory configuration
-- [ ] Recursive image discovery
-- [ ] SQLite index, rebuildable from the library
+- [x] Recursive image discovery
+- [x] SQLite index, rebuildable from the library
 - [ ] Content hashing and library metadata reconciliation
 - [ ] Asynchronous thumbnail generation and caching
 - [ ] Image grid

@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use backdrop_core::index::{Index, ScanSummary};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::settings::{LibraryStatus, Settings};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -19,12 +22,22 @@ enum Library {
     Loaded(LibraryStatus),
 }
 
+/// The latest scan of an available library folder.
+enum Scan {
+    Running,
+    Finished(ScanSummary),
+    Failed(SharedString),
+}
+
 /// The main window's content: title bar above the library.
 pub struct Workspace {
     paths: AppPaths,
     library: Library,
     /// A folder prompt or settings save is in progress.
     choosing: bool,
+    scan: Scan,
+    /// Dropping it discards the result of a scan that is no longer wanted.
+    scan_task: Option<Task<()>>,
     focus_handle: FocusHandle,
 }
 
@@ -40,12 +53,12 @@ impl Workspace {
                     Settings::load(&settings_file).map(|settings| settings.library_status())
                 })
                 .await;
-            this.update(cx, |this, cx| {
-                this.library = match result {
-                    Ok(status) => Library::Loaded(status),
-                    Err(error) => Library::Unreadable(error.to_string().into()),
-                };
-                cx.notify();
+            this.update(cx, |this, cx| match result {
+                Ok(status) => this.set_library_status(status, cx),
+                Err(error) => {
+                    this.library = Library::Unreadable(error.to_string().into());
+                    cx.notify();
+                }
             })
             .ok();
         })
@@ -55,8 +68,37 @@ impl Workspace {
             paths,
             library: Library::Loading,
             choosing: false,
+            scan: Scan::Running,
+            scan_task: None,
             focus_handle,
         }
+    }
+
+    fn set_library_status(&mut self, status: LibraryStatus, cx: &mut Context<Self>) {
+        if let LibraryStatus::Available(root) = &status {
+            self.scan_library(root.clone(), cx);
+        }
+        self.library = Library::Loaded(status);
+        cx.notify();
+    }
+
+    /// Brings the index up to date with the library in the background.
+    fn scan_library(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.scan = Scan::Running;
+        let database = self.paths.database_file();
+        self.scan_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { Index::open(&database)?.scan(&root) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.scan = match result {
+                    Ok(summary) => Scan::Finished(summary),
+                    Err(error) => Scan::Failed(error.to_string().into()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Asks for a folder and saves it as the library folder.
@@ -96,7 +138,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 this.choosing = false;
                 match outcome {
-                    Some(Ok(status)) => this.library = Library::Loaded(status),
+                    Some(Ok(status)) => this.set_library_status(status, cx),
                     Some(Err((title, message))) => {
                         window.push_notification(Notification::error(message).title(title), cx)
                     }
@@ -134,17 +176,46 @@ impl Workspace {
                 dir.display().to_string(),
                 Some(choose.primary().label("Choose Folder…")),
             ),
-            // Stands in for the image grid until scanning exists.
+            // Stands in for the image grid.
             LibraryStatus::Available(dir) => empty_state(
                 dir.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| dir.display().to_string()),
-                dir.display().to_string(),
+                self.scan_description(),
                 Some(choose.outline().label("Change Folder…")),
             ),
         }
         .into_any_element()
     }
+
+    fn scan_description(&self) -> SharedString {
+        match &self.scan {
+            Scan::Running => "Scanning…".into(),
+            Scan::Failed(message) => message.clone(),
+            Scan::Finished(summary) => {
+                let images = count(summary.total(), "image", "images");
+                match summary.issues().len() {
+                    0 => images.into(),
+                    skipped => {
+                        format!("{images} · {} skipped", count(skipped, "file", "files")).into()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Formats `n` with thousands separators and the matching noun, e.g. "1,234 images".
+fn count(n: usize, one: &str, many: &str) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::new();
+    for (ix, digit) in digits.chars().enumerate() {
+        if ix > 0 && (digits.len() - ix).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{grouped} {}", if n == 1 { one } else { many })
 }
 
 fn empty_state(
@@ -182,5 +253,19 @@ impl Render for Workspace {
                     .p_4()
                     .child(self.render_library(cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count;
+
+    #[test]
+    fn counts_are_grouped_and_pluralized() {
+        assert_eq!(count(0, "image", "images"), "0 images");
+        assert_eq!(count(1, "image", "images"), "1 image");
+        assert_eq!(count(999, "image", "images"), "999 images");
+        assert_eq!(count(1234, "image", "images"), "1,234 images");
+        assert_eq!(count(1234567, "image", "images"), "1,234,567 images");
     }
 }

@@ -4,5 +4,8 @@
 //! providers, desktop integration, and settings live here so both front ends
 //! use the same behavior, database, and configuration.
 
+pub mod discovery;
+pub mod image;
+pub mod index;
 pub mod paths;
 pub mod settings;

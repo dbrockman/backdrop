@@ -15,11 +15,14 @@ backdrop-core = { path = "crates/backdrop-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+imagesize = { version = "0.15", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 gpui-kit = "=0.7.1"
+rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 toml = "1"
+walkdir = "2"
 
 [profile.release]
 lto = "thin"
