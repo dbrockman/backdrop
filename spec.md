@@ -198,6 +198,8 @@ The API key is optional for functionality that supports unauthenticated access.
 
 **Safe-for-work content is the default.**
 
+When browsing a provider, each session starts safe for work. Turning on Sketchy or NSFW lasts until the window closes and is never saved, so explicit results always follow a deliberate choice. NSFW is unavailable without an API key, and removing the key turns it off. Results whose rating wasn't chosen are dropped even if the provider returns them.
+
 Explicit content must not be displayed unless the user deliberately enables it.
 
 Provider-specific content filtering settings should remain separate from general library filters.
@@ -710,7 +712,7 @@ The goal is a useful offline wallpaper browser.
 - [ ] Display provider tags
 - [x] Search and browse Wallhaven
 - [x] API-key configuration
-- [ ] SFW/NSFW filtering
+- [x] SFW/NSFW filtering
 - [x] Download original images
 - [ ] Detect already-downloaded images
 - [x] Download destination rules

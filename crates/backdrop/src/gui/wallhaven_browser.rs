@@ -1,7 +1,8 @@
 //! Browsing Wallhaven: a search toolbar, a grid of results, and downloading
 //! the selected wallpaper into the library.
 //!
-//! Only safe-for-work wallpapers are shown. Results arrive a page at a time;
+//! Only safe-for-work wallpapers are shown until the user turns on Sketchy or
+//! NSFW, which lasts until the window closes; NSFW also needs an API key. Results arrive a page at a time;
 //! the next page loads from the button after the last row, or when the keyboard
 //! selection reaches the last row. Thumbnails are downloaded in the background
 //! into the XDG cache, in display order, and a tile shows a placeholder until
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 use backdrop_core::image::Orientation;
 use backdrop_core::library::{Downloaded, Library};
-use backdrop_core::providers::{Provider, RemoteWallpaper, SearchQuery, SearchSort};
+use backdrop_core::providers::{ContentRating, Provider, RemoteWallpaper, SearchQuery, SearchSort};
 use backdrop_core::remote_thumbnails::RemoteThumbnails;
 use gpui_kit::component::button::{
     Button, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
@@ -61,6 +62,14 @@ const ORIENTATIONS: [(Option<Orientation>, &str); 4] = [
     (Some(Orientation::Landscape), "Landscape"),
     (Some(Orientation::Portrait), "Portrait"),
     (Some(Orientation::Square), "Square"),
+];
+
+/// Content ratings, mildest first. The choice is never saved: each session
+/// starts safe for work.
+const RATINGS: [(ContentRating, &str); 3] = [
+    (ContentRating::Sfw, "SFW"),
+    (ContentRating::Sketchy, "Sketchy"),
+    (ContentRating::Nsfw, "NSFW"),
 ];
 
 const SORTS: [(SearchSort, &str); 6] = [
@@ -439,6 +448,39 @@ impl WallhavenBrowser {
         }
     }
 
+    /// Shows wallpapers of these ratings. NSFW is left out without an API key,
+    /// and at least one rating stays on.
+    fn set_ratings(&mut self, ratings: Vec<ContentRating>, cx: &mut Context<Self>) {
+        let has_key = self.provider.has_api_key();
+        let ratings: Vec<_> = ratings
+            .into_iter()
+            .filter(|rating| *rating != ContentRating::Nsfw || has_key)
+            .collect();
+        if ratings.is_empty() || ratings == self.query.effective_ratings() {
+            return;
+        }
+        self.query.ratings = ratings;
+        self.search(cx);
+    }
+
+    /// Without a key, NSFW can't be searched, so removing the key turns it off.
+    fn api_key_changed(&mut self, cx: &mut Context<Self>) {
+        let ratings = self.query.effective_ratings();
+        if !self.provider.has_api_key() && ratings.contains(&ContentRating::Nsfw) {
+            self.query.ratings = ratings
+                .into_iter()
+                .filter(|rating| *rating != ContentRating::Nsfw)
+                .collect();
+            self.search(cx);
+        }
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn ratings(&self) -> Vec<ContentRating> {
+        self.query.effective_ratings()
+    }
+
     fn set_sort(&mut self, sort: SearchSort, cx: &mut Context<Self>) {
         if self.query.sort != sort {
             self.query.sort = sort;
@@ -456,9 +498,10 @@ impl WallhavenBrowser {
         let provider = self.provider.clone();
         let settings_file = self.settings_file.clone();
         let form = cx.new(|cx| ApiKeyForm::new(provider, settings_file, window, cx));
-        // The toolbar button names whether a key is set.
-        self._api_key_subscription =
-            Some(cx.subscribe(&form, |_, _, _: &ApiKeyChanged, cx| cx.notify()));
+        // The toolbar names whether a key is set, and NSFW depends on one.
+        self._api_key_subscription = Some(cx.subscribe(&form, |this, _, _: &ApiKeyChanged, cx| {
+            this.api_key_changed(cx)
+        }));
         let title: SharedString = format!("{} API key", self.provider.name()).into();
         // The builder can run again when the dialog layer is rebuilt; focus the
         // field only the first time.
@@ -629,6 +672,7 @@ impl WallhavenBrowser {
     /// The search field and the filters that shape the results, always
     /// visible so the current search is never a hidden state.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ratings = self.render_ratings(cx);
         let theme = cx.theme();
         let orientation = self.query.orientation;
         let sort = self.query.sort;
@@ -686,6 +730,7 @@ impl WallhavenBrowser {
                         }
                     })),
             )
+            .child(ratings)
             .child(div().flex_1())
             .when_some(count, |toolbar, count| {
                 toolbar.child(
@@ -731,6 +776,36 @@ impl WallhavenBrowser {
                         })
                     }),
             )
+    }
+
+    /// Which content ratings to show. Several can be on; NSFW needs an API key.
+    fn render_ratings(&self, cx: &mut Context<Self>) -> ToggleGroup {
+        let ratings = self.query.effective_ratings();
+        let has_key = self.provider.has_api_key();
+        ToggleGroup::new("wallhaven-ratings")
+            .outline()
+            .small()
+            .children(RATINGS.iter().map(|(rating, name)| {
+                let toggle = Toggle::new(*name)
+                    .label(*name)
+                    .checked(ratings.contains(rating));
+                if *rating == ContentRating::Nsfw && !has_key {
+                    toggle
+                        .disabled(true)
+                        .tooltip("Add an API key to show NSFW wallpapers")
+                } else {
+                    toggle
+                }
+            }))
+            .on_click(cx.listener(|this, checks: &Vec<bool>, _, cx| {
+                let ratings = RATINGS
+                    .iter()
+                    .zip(checks)
+                    .filter(|(_, checked)| **checked)
+                    .map(|((rating, _), _)| *rating)
+                    .collect();
+                this.set_ratings(ratings, cx);
+            }))
     }
 
     fn render_results(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -942,6 +1017,12 @@ impl WallhavenBrowser {
         };
         let id = wallpaper.id().to_owned();
         let mut details = vec![format::dimensions(wallpaper.width(), wallpaper.height())];
+        if let Some((_, rating)) = RATINGS
+            .iter()
+            .find(|(rating, _)| *rating == wallpaper.rating())
+        {
+            details.push((*rating).to_owned());
+        }
         if let Some(size) = wallpaper.file_size() {
             details.push(format::file_size(size));
         }
@@ -1278,5 +1359,87 @@ mod tests {
         assert_eq!(saved_key(&fixture), None);
         assert_eq!(fixture.provider.api_key(), None);
         assert!(!dialog_is_open(&fixture, cx));
+    }
+    fn click(fixture: &Fixture, id: &'static str, cx: &mut TestAppContext) {
+        cx.update_window(fixture.window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn ratings(fixture: &Fixture, cx: &mut TestAppContext) -> Vec<ContentRating> {
+        cx.update(|cx| fixture.browser.read(cx).ratings())
+    }
+
+    #[gpui_kit::test]
+    fn sketchy_wallpapers_are_shown_only_once_turned_on(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+        assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
+
+        click(&fixture, "Sketchy", cx);
+
+        let expected = [ContentRating::Sfw, ContentRating::Sketchy];
+        assert_eq!(ratings(&fixture, cx), expected);
+        let searches = fixture.provider.searches();
+        assert_eq!(searches.len(), 2);
+        assert_eq!(searches[1].effective_ratings(), expected);
+    }
+
+    #[gpui_kit::test]
+    fn nsfw_wallpapers_need_an_api_key(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+
+        click(&fixture, "NSFW", cx);
+        assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
+        assert_eq!(fixture.provider.searches().len(), 1);
+
+        enter_api_key(&fixture, "abc123", cx);
+        press(&fixture, "enter", cx);
+        click(&fixture, "NSFW", cx);
+
+        assert_eq!(
+            ratings(&fixture, cx),
+            [ContentRating::Sfw, ContentRating::Nsfw]
+        );
+        let searches = fixture.provider.searches();
+        assert!(
+            searches
+                .last()
+                .unwrap()
+                .effective_ratings()
+                .contains(&ContentRating::Nsfw)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn removing_the_api_key_turns_nsfw_off(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+        enter_api_key(&fixture, "abc123", cx);
+        press(&fixture, "enter", cx);
+        click(&fixture, "NSFW", cx);
+        let searches = fixture.provider.searches().len();
+
+        click(&fixture, "api-key", cx);
+        click(&fixture, "remove-api-key", cx);
+
+        assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
+        let all = fixture.provider.searches();
+        assert_eq!(all.len(), searches + 1, "the results are searched again");
+        assert_eq!(
+            all.last().unwrap().effective_ratings(),
+            [ContentRating::Sfw]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_last_rating_stays_on(cx: &mut TestAppContext) {
+        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
+
+        click(&fixture, "SFW", cx);
+
+        assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
+        assert_eq!(fixture.provider.searches().len(), 1);
     }
 }
