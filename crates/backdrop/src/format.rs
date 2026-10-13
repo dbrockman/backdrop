@@ -1,6 +1,7 @@
 //! Formatting of numbers, sizes, and dates for display.
 
 use backdrop_core::image::ImageFormat;
+use backdrop_core::providers::ContentRating;
 use chrono::{DateTime, Local};
 
 /// Formats `n` with thousands separators and the matching noun, e.g. "1,234 images".
@@ -42,6 +43,15 @@ pub fn image_format(format: ImageFormat) -> &'static str {
         ImageFormat::Jpeg => "JPEG",
         ImageFormat::Png => "PNG",
         ImageFormat::Webp => "WebP",
+    }
+}
+
+/// How a content rating is written: "SFW", "Sketchy", or "NSFW".
+pub fn content_rating(rating: ContentRating) -> &'static str {
+    match rating {
+        ContentRating::Sfw => "SFW",
+        ContentRating::Sketchy => "Sketchy",
+        ContentRating::Nsfw => "NSFW",
     }
 }
 

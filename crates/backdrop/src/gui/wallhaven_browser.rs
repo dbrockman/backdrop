@@ -1017,12 +1017,7 @@ impl WallhavenBrowser {
         };
         let id = wallpaper.id().to_owned();
         let mut details = vec![format::dimensions(wallpaper.width(), wallpaper.height())];
-        if let Some((_, rating)) = RATINGS
-            .iter()
-            .find(|(rating, _)| *rating == wallpaper.rating())
-        {
-            details.push((*rating).to_owned());
-        }
+        details.push(format::content_rating(wallpaper.rating()).to_owned());
         if let Some(size) = wallpaper.file_size() {
             details.push(format::file_size(size));
         }

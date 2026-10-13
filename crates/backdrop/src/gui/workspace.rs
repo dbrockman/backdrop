@@ -336,7 +336,9 @@ impl Workspace {
         let Some(grid) = self.grid.clone() else {
             return;
         };
-        let detail = cx.new(|cx| ImageDetail::new(grid, cx));
+        let detail = cx.new(|cx| {
+            ImageDetail::new(grid, self.provider.clone(), self.paths.database_file(), cx)
+        });
         self._detail_subscription = Some(cx.subscribe_in(
             &detail,
             window,
@@ -728,12 +730,26 @@ mod tests {
         gpui_kit::AnyWindowHandle,
         Entity<Workspace>,
     ) {
+        let images: Vec<_> = (0..count).map(|ix| (format!("{ix}.png"), 64, 40)).collect();
+        open_workspace_with(&images, cx)
+    }
+
+    /// A workspace whose library folder holds images of these names and sizes.
+    fn open_workspace_with(
+        images: &[(String, u32, u32)],
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        AppPaths,
+        gpui_kit::AnyWindowHandle,
+        Entity<Workspace>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("library");
         std::fs::create_dir(&root).unwrap();
-        for ix in 0..count {
-            RgbImage::from_pixel(64, 40, Rgb([ix * 30, 80, 120]))
-                .save(root.join(format!("{ix}.png")))
+        for (ix, (name, width, height)) in images.iter().enumerate() {
+            RgbImage::from_pixel(*width, *height, Rgb([ix as u8 * 30, 80, 120]))
+                .save(root.join(name))
                 .unwrap();
         }
         let paths = AppPaths::new(
@@ -843,5 +859,52 @@ mod tests {
         cx.update_window(window, |_, window, cx| window.press("right", cx))
             .unwrap();
         assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(0));
+    }
+    #[gpui_kit::test]
+    fn get_details_links_a_recognized_image_and_shows_its_tags(cx: &mut TestAppContext) {
+        // Named like a download from the fake provider, at the size its
+        // wallpapers report.
+        let images = [("fake-aaa111.png".to_owned(), 20, 10)];
+        let (_dir, paths, window, workspace) = open_workspace_with(&images, cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click("fake-aaa111.png", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let detail = cx.update(|cx| workspace.read(cx).detail.clone().expect("detail open"));
+        assert!(cx.update(|cx| detail.read(cx).tags(cx).is_empty()));
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("get-details", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| detail.read(cx).tags(cx)),
+            ["mountains", "lake"]
+        );
+        let root = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .grid
+                .clone()
+                .unwrap()
+                .read(cx)
+                .root()
+                .to_path_buf()
+        });
+        let metadata = Library::open(&root, &paths.database_file())
+            .unwrap()
+            .metadata()
+            .unwrap();
+        let record = metadata
+            .get(std::path::Path::new("fake-aaa111.png"))
+            .unwrap();
+        assert_eq!(record.source(), Some("fake/aaa111"));
     }
 }

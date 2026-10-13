@@ -413,4 +413,18 @@ impl RemoteWallpaper {
             tags: None,
         }
     }
+
+    /// The wallpaper with these tags, as its details have them.
+    pub fn with_tags(mut self, names: &[&str]) -> Self {
+        self.tags = Some(
+            names
+                .iter()
+                .map(|name| Tag {
+                    name: (*name).to_owned(),
+                    category: None,
+                })
+                .collect(),
+        );
+        self
+    }
 }

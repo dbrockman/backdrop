@@ -98,7 +98,7 @@ impl Provider for FakeProvider {
     }
 
     fn wallpaper(&self, id: &str) -> Result<RemoteWallpaper, ProviderError> {
-        Ok(RemoteWallpaper::for_test("fake", id))
+        Ok(RemoteWallpaper::for_test("fake", id).with_tags(&["mountains", "lake"]))
     }
 
     fn download(

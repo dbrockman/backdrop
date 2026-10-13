@@ -57,6 +57,24 @@ impl Library {
         Ok(sources)
     }
 
+    /// The source of the image at `path`: recorded, or recognized from its file
+    /// name by `provider`. Reads only the metadata file, not the index.
+    pub fn image_source(
+        &self,
+        provider: &dyn Provider,
+        path: &Path,
+    ) -> Result<Option<ImageSource>, LibraryError> {
+        if let Some(source) = self
+            .metadata()?
+            .get(path)
+            .and_then(|record| record.source())
+        {
+            return Ok(Some(ImageSource::Recorded(source.to_owned())));
+        }
+        Ok(id_from_path(provider, path)
+            .map(|id| ImageSource::FileName(format!("{}/{id}", provider.id()))))
+    }
+
     /// Records `wallpaper` as the source of the indexed image at `path`, and
     /// saves its snapshot unless the library has one. The image must have the
     /// wallpaper's dimensions, so a misnamed file isn't given another

@@ -3,15 +3,27 @@
 //! The grid owns the images, the selection, and favorites; this view shows the
 //! grid's selected image and moves the selection when stepping through images,
 //! so returning to the grid lands on the image that was last shown.
+//!
+//! When the image came from a provider, the details also show what the
+//! provider said about it: its page, rating, upload date, and tags, read from
+//! the snapshot saved in the library. An image only recognized by its file
+//! name can be linked from here, which fetches that snapshot.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use backdrop_core::image::ImageFile;
+use backdrop_core::library::{ImageSource, Library};
+use backdrop_core::providers::Provider;
+use backdrop_core::snapshot::Snapshot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
+use gpui_kit::component::link::Link;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    StyledExt as _, h_flex, v_flex,
+    StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -32,21 +44,179 @@ pub struct BackToGrid;
 const DECODED_IMAGES: usize = 4;
 const SIDEBAR_WIDTH: f32 = 20.;
 
+/// Where an image came from, as the library records it.
+struct Provenance {
+    source: Option<ImageSource>,
+    /// The provider's snapshot, for a recorded source that has one.
+    snapshot: Option<Snapshot>,
+}
+
 pub struct ImageDetail {
     grid: Entity<LibraryGrid>,
+    /// Recognizes provider file names and fetches details when linking.
+    provider: Arc<dyn Provider>,
+    database: PathBuf,
+    /// The provenance of the image it was read for. Keyed by path, so a
+    /// result that arrives after moving on is never shown for another image.
+    provenance: Option<(PathBuf, Provenance)>,
+    /// The image whose provenance is being read.
+    reading: Option<PathBuf>,
+    /// Details are being fetched to link the shown image.
+    linking: bool,
     focus_handle: FocusHandle,
     image_cache: Entity<LruImageCache>,
     _grid_observation: Subscription,
+    _provenance_task: Option<Task<()>>,
 }
 
 impl ImageDetail {
-    pub fn new(grid: Entity<LibraryGrid>, cx: &mut Context<Self>) -> Self {
-        Self {
-            _grid_observation: cx.observe(&grid, |_, _, cx| cx.notify()),
+    pub fn new(
+        grid: Entity<LibraryGrid>,
+        provider: Arc<dyn Provider>,
+        database: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut detail = Self {
+            _grid_observation: cx.observe(&grid, |this, _, cx| {
+                this.read_provenance(cx);
+                cx.notify();
+            }),
             grid,
+            provider,
+            database,
+            provenance: None,
+            reading: None,
+            linking: false,
             focus_handle: cx.focus_handle(),
             image_cache: LruImageCache::new(DECODED_IMAGES, cx),
+            _provenance_task: None,
+        };
+        detail.read_provenance(cx);
+        detail
+    }
+
+    fn shown_path(&self, cx: &App) -> Option<PathBuf> {
+        let grid = self.grid.read(cx);
+        let ix = grid.selected_ix()?;
+        Some(grid.images()[ix].path().to_path_buf())
+    }
+
+    /// Reads the shown image's source and snapshot, unless they are already
+    /// read or being read.
+    fn read_provenance(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.shown_path(cx) else {
+            return;
+        };
+        let current = self.provenance.as_ref().map(|(read, _)| read);
+        if current == Some(&path) || self.reading.as_ref() == Some(&path) {
+            return;
         }
+        self.reload_provenance(path, cx);
+    }
+
+    fn reload_provenance(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.reading = Some(path.clone());
+        let root = self.grid.read(cx).root().to_path_buf();
+        let database = self.database.clone();
+        let provider = self.provider.clone();
+        self._provenance_task = Some(cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
+            let provenance = cx
+                .background_spawn(async move {
+                    let library = Library::open(&root, &database).ok()?;
+                    let source = library.image_source(provider.as_ref(), &read_path).ok()?;
+                    let snapshot = match &source {
+                        Some(ImageSource::Recorded(source)) => {
+                            Snapshot::load(&root, source).ok().flatten()
+                        }
+                        _ => None,
+                    };
+                    Some(Provenance { source, snapshot })
+                })
+                .await
+                // Unreadable metadata shows no provenance; the scan reports it.
+                .unwrap_or(Provenance {
+                    source: None,
+                    snapshot: None,
+                });
+            this.update(cx, |detail, cx| {
+                if detail.reading.as_ref() == Some(&path) {
+                    detail.reading = None;
+                    detail.provenance = Some((path, provenance));
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The provenance of the shown image, once read.
+    fn provenance(&self, path: &Path) -> Option<&Provenance> {
+        let (read, provenance) = self.provenance.as_ref()?;
+        (read == path).then_some(provenance)
+    }
+
+    /// Fetches the details of the wallpaper the shown image's file name names,
+    /// and records it as the image's source with its snapshot.
+    fn link_shown_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.shown_path(cx) else {
+            return;
+        };
+        let Some(ImageSource::FileName(source)) = self
+            .provenance(&path)
+            .and_then(|provenance| provenance.source.clone())
+        else {
+            return;
+        };
+        let prefix = format!("{}/", self.provider.id());
+        let Some(id) = source.strip_prefix(&prefix).map(str::to_owned) else {
+            return;
+        };
+        if self.linking {
+            return;
+        }
+        self.linking = true;
+        cx.notify();
+        let root = self.grid.read(cx).root().to_path_buf();
+        let database = self.database.clone();
+        let provider = self.provider.clone();
+        let name = provider.name();
+        cx.spawn_in(window, async move |this, cx| {
+            let linked_path = path.clone();
+            let result = cx
+                .background_spawn(async move {
+                    let wallpaper = provider.wallpaper(&id)?;
+                    Library::open(&root, &database)?.link_source(&linked_path, &wallpaper)?;
+                    anyhow::Ok(())
+                })
+                .await;
+            this.update_in(cx, |detail, window, cx| {
+                detail.linking = false;
+                match result {
+                    Ok(()) => detail.reload_provenance(path, cx),
+                    Err(error) => window.push_notification(
+                        Notification::error(error.to_string())
+                            .title(format!("Couldn’t get the details from {name}")),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    #[cfg(test)]
+    pub fn tags(&self, cx: &App) -> Vec<String> {
+        self.shown_path(cx)
+            .and_then(|path| {
+                self.provenance(&path)?
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.tags().iter().map(|tag| tag.name.clone()).collect())
+            })
+            .unwrap_or_default()
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -108,6 +278,7 @@ impl ImageDetail {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let source = self.render_source(image.path(), cx);
         let theme = cx.theme();
         let path = image.path();
         let grid = self.grid.read(cx);
@@ -132,6 +303,9 @@ impl ImageDetail {
         };
 
         v_flex()
+            .id("image-details")
+            // Long tag lists scroll with the rest of the details.
+            .overflow_y_scroll()
             .w(rems(SIDEBAR_WIDTH))
             .flex_none()
             .h_full()
@@ -225,6 +399,109 @@ impl ImageDetail {
                             })),
                     ),
             )
+            .children(source)
+    }
+}
+
+impl ImageDetail {
+    /// Where the image came from and what its provider said about it, below
+    /// the actions because it supplements the image rather than acting on it.
+    fn render_source(&self, path: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let provenance = self.provenance(path)?;
+        let source = provenance.source.as_ref()?;
+        let heading = div().text_sm().font_semibold();
+        let section = v_flex()
+            .gap_2()
+            .pt_4()
+            .border_t_1()
+            .border_color(theme.border);
+
+        let snapshot =
+            match (source, &provenance.snapshot) {
+                (ImageSource::Recorded(_), Some(snapshot)) => snapshot,
+                (ImageSource::Recorded(source), None) => {
+                    return Some(
+                        section
+                            .child(heading.child("Source"))
+                            .child(div().text_sm().child(source.clone()))
+                            .into_any_element(),
+                    );
+                }
+                (ImageSource::FileName(source), _) => {
+                    return Some(
+                        section
+                            .child(heading.child("Source"))
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(
+                                format!(
+                                    "Named like a download of {source}. Get its details to \
+                                     see its tags and keep the link if it's renamed."
+                                ),
+                            ))
+                            .child(
+                                Button::new("get-details")
+                                    .outline()
+                                    .small()
+                                    .label("Get Details")
+                                    .loading(self.linking)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.link_shown_image(window, cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            };
+
+        let page = snapshot.page_url();
+        let page_label = page
+            .strip_prefix("https://")
+            .or_else(|| page.strip_prefix("http://"))
+            .unwrap_or(page)
+            .to_owned();
+        let mut details = DescriptionList::horizontal().columns(1).small().item(
+            "Page",
+            Link::new("provider-page")
+                .href(page.to_owned())
+                .child(page_label)
+                .into_any_element(),
+            1,
+        );
+        if let Some(rating) = snapshot.rating() {
+            details = details.item("Rating", format::content_rating(rating), 1);
+        }
+        if let Some(uploaded) = snapshot.uploaded() {
+            // The provider's own date, without a time zone; the day is enough.
+            let day = uploaded.to_string();
+            let day = day.split(['T', ' ']).next().unwrap_or(&day).to_owned();
+            details = details.item("Uploaded", day, 1);
+        }
+        let tags = snapshot.tags();
+        Some(
+            section
+                .child(heading.child(self.source_name(snapshot)))
+                .child(details)
+                .when(!tags.is_empty(), |section| {
+                    section.child(
+                        h_flex().flex_wrap().gap_1().children(
+                            tags.iter()
+                                .map(|tag| Tag::secondary().small().child(tag.name.clone())),
+                        ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The provider's name for a heading, e.g. "Wallhaven".
+    fn source_name(&self, snapshot: &Snapshot) -> SharedString {
+        let source = snapshot.source();
+        let provider = source.split('/').next().unwrap_or_default();
+        if provider == self.provider.id() {
+            self.provider.name().into()
+        } else {
+            provider.to_owned().into()
+        }
     }
 }
 
