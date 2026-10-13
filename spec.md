@@ -698,6 +698,7 @@ The goal is a useful offline wallpaper browser.
 - [ ] Git status detection
 - [ ] Git status indicators and filters
 - [ ] Additional sorting and filtering options
+- [ ] Reverse the sort order (e.g. oldest first, smallest first)
 
 ### Phase 4 — Enhancements
 
