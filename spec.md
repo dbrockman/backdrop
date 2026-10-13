@@ -271,7 +271,7 @@ Settings should define a default download directory and optionally a set of orde
 
 Each matching download rule should resolve to a directory within the configured library root.
 
-**Open decision:** Define whether the first matching rule wins or whether rules can combine to construct nested directories, such as `nsfw/dark/`.
+**Decided:** rules are ordered and the first matching rule wins. Rules do not combine; a nested destination such as `nsfw/dark/` is written as one rule whose criteria match both.
 
 ---
 
@@ -614,7 +614,7 @@ backdrop library [set <dir>]
 backdrop paths
 ```
 
-Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide downloads, filtering, and metadata editing.
+Later phases add commands alongside their features, such as `backdrop wallhaven search`, `backdrop wallhaven info <id|link|file>`, `backdrop wallhaven download <id|link|file>… [--to <folder>]` and `backdrop wallhaven api-key [set|clear]` (Phase 2) and `backdrop git status` (Phase 3). Future commands could provide filtering and metadata editing.
 
 CLI operations should use the same settings, database, and core logic as the GUI.
 
@@ -685,12 +685,12 @@ The goal is a useful offline wallpaper browser.
 
 - [x] Wallhaven provider implementation
 - [ ] Recognize Wallhaven filenames
-- [ ] Snapshot provider metadata into the library
+- [x] Snapshot provider metadata into the library
 - [ ] Display provider tags
 - [ ] Search and browse Wallhaven
 - [ ] API-key configuration
 - [ ] SFW/NSFW filtering
-- [ ] Download original images
+- [x] Download original images
 - [ ] Detect already-downloaded images
 - [ ] Download destination rules
 
@@ -725,7 +725,6 @@ These questions can be resolved during implementation.
 
 | Topic | Question |
 |---|---|
-| Download rules | First matching rule or composable directory rules? |
 | Download rules location | Should download rules be stored in the library (`.backdrop/`) or in XDG settings? |
 | Downloaded indicators | Highlight, dim, hide, or provide a toggle? |
 | Content ratings | Should filtering apply to local images as well as online browsing? |

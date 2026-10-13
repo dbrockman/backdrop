@@ -16,10 +16,16 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod download;
+
 use crate::image::ImageFile;
 use crate::index::{Index, IndexError, ScanSummary};
 use crate::metadata::{self, ImageMetadata, LibraryMetadata, MetadataError};
+use crate::providers::ProviderError;
 use crate::query::ImageOrder;
+use crate::snapshot::SnapshotError;
+
+pub use download::Downloaded;
 
 /// Removals above both limits in one scan need confirmation.
 const CONFIRM_REMOVALS_FROM_COUNT: usize = 20;
@@ -39,6 +45,21 @@ pub enum LibraryError {
     OutsideLibrary { path: PathBuf, root: PathBuf },
     #[error("could not find {}: {cause}", path.display())]
     NotFound {
+        path: PathBuf,
+        cause: std::io::Error,
+    },
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+    #[error("{} can't hold downloads: use a folder inside the library that isn't hidden or a link", path.display())]
+    InvalidDownloadFolder { path: PathBuf },
+    #[error("{} already exists", path.display())]
+    FileExists { path: PathBuf },
+    #[error("the download of {wallpaper} is not a usable image: {message}")]
+    NotAnImage { wallpaper: String, message: String },
+    #[error("could not save the download to {}: {cause}", path.display())]
+    Download {
         path: PathBuf,
         cause: std::io::Error,
     },
@@ -219,8 +240,6 @@ impl Library {
         Ok(())
     }
 
-    /// Removes the records for `paths` whose images are still missing, and
-    /// returns how many were removed.
     /// Moves the indexed image at `path` to `trash` and forgets it: its index
     /// entry, its metadata record, and a provider snapshot nothing else uses.
     ///
@@ -246,6 +265,8 @@ impl Library {
         Ok(())
     }
 
+    /// Removes the records for `paths` whose images are still missing, and
+    /// returns how many were removed.
     pub fn remove_missing(&mut self, paths: &[PathBuf]) -> Result<usize, LibraryError> {
         let indexed: HashSet<PathBuf> = self.indexed_sizes()?.into_keys().collect();
         let root = self.root.clone();

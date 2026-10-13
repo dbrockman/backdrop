@@ -195,7 +195,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
             print_paths(&paths);
             Ok(())
         }
-        Command::Wallhaven { command } => wallhaven::run(&paths.settings_file(), command),
+        Command::Wallhaven { command } => wallhaven::run(&paths, command),
     }
 }
 

@@ -150,7 +150,8 @@ pub(crate) fn discover(
     Ok(discovery)
 }
 
-enum ProbeError {
+/// Why a file could not be read as an image.
+pub(crate) enum ProbeError {
     Io(io::Error),
     Invalid(&'static str),
 }
@@ -160,7 +161,7 @@ const UNSUPPORTED: &str = "not a JPEG, PNG, or WebP image";
 /// Reads the format and the upright dimensions from the file header: an image
 /// whose EXIF orientation rotates it a quarter turn has its width and height
 /// swapped, so orientation filters match what the user sees.
-fn probe(path: &Path) -> Result<(ImageFormat, u32, u32), ProbeError> {
+pub(crate) fn probe(path: &Path) -> Result<(ImageFormat, u32, u32), ProbeError> {
     let file = File::open(path).map_err(ProbeError::Io)?;
     let reader = ImageReader::new(BufReader::new(file))
         .with_guessed_format()
@@ -190,6 +191,15 @@ fn probe(path: &Path) -> Result<(ImageFormat, u32, u32), ProbeError> {
     } else {
         (format, width, height)
     })
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(cause) => cause.fmt(f),
+            Self::Invalid(message) => f.write_str(message),
+        }
+    }
 }
 
 fn probe_error(error: ImageError) -> ProbeError {

@@ -1,10 +1,12 @@
-//! `backdrop wallhaven`: searching and describing Wallhaven wallpapers, and
-//! its API key.
+//! `backdrop wallhaven`: searching, describing, and downloading Wallhaven
+//! wallpapers, and its API key.
 
 use std::io::{self, BufRead as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
+use backdrop_core::library::Downloaded;
+use backdrop_core::paths::AppPaths;
 use backdrop_core::providers::{
     ContentRating, Provider, ProviderError, RemoteWallpaper, SearchQuery, SearchSort, Wallhaven,
 };
@@ -22,6 +24,16 @@ pub enum WallhavenCommand {
     Info {
         /// A wallpaper id, a link to it, or a file name like wallhaven-94x38z.jpg.
         wallpaper: String,
+    },
+    /// Download wallpapers into the library, skipping any it already has.
+    Download {
+        /// Wallpaper ids, links to them, or file names like wallhaven-94x38z.jpg.
+        #[arg(required = true)]
+        wallpapers: Vec<String>,
+        /// The library folder to save into, such as `dark`; the library
+        /// folder itself by default. Missing folders are created.
+        #[arg(long, value_name = "FOLDER")]
+        to: Option<PathBuf>,
     },
     /// Show whether an API key is set, or change it. NSFW wallpapers need one.
     ApiKey {
@@ -161,10 +173,14 @@ impl SearchArgs {
     }
 }
 
-pub fn run(settings_file: &Path, command: WallhavenCommand) -> anyhow::Result<()> {
+pub fn run(paths: &AppPaths, command: WallhavenCommand) -> anyhow::Result<()> {
+    let settings_file = &paths.settings_file();
     match command {
         WallhavenCommand::Search(args) => search(&client(settings_file)?, &args.query()),
         WallhavenCommand::Info { wallpaper } => info(&client(settings_file)?, &wallpaper),
+        WallhavenCommand::Download { wallpapers, to } => {
+            download(paths, &wallpapers, to.as_deref())
+        }
         WallhavenCommand::ApiKey { command: None } => {
             let set = Settings::load(settings_file)?.wallhaven_api_key().is_some();
             println!("{}", if set { "set" } else { "not set" });
@@ -259,6 +275,93 @@ fn search_line(wallpaper: &RemoteWallpaper) -> String {
         wallpaper.rating().as_str(),
         wallpaper.page_url()
     )
+}
+
+/// Downloads each wallpaper in turn and prints where it is in the library.
+/// All are looked up even if some fail; the command fails if any did.
+fn download(paths: &AppPaths, wallpapers: &[String], to: Option<&Path>) -> anyhow::Result<()> {
+    let wallhaven = client(&paths.settings_file())?;
+    let ids = wallpapers
+        .iter()
+        .map(|text| {
+            wallhaven.parse_id(text).ok_or_else(|| {
+                anyhow!("{text} is not a Wallhaven wallpaper id, link, or file name")
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Scanned first, so wallpapers already in the library are found.
+    let (mut library, _) = super::scan(paths)?;
+    let folder = match to {
+        None => PathBuf::new(),
+        Some(folder) if folder.is_absolute() => match folder.strip_prefix(library.root()) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => bail!(
+                "{} is not inside the library folder {}",
+                folder.display(),
+                library.root().display()
+            ),
+        },
+        Some(folder) => folder.to_path_buf(),
+    };
+
+    let mut failed = 0;
+    for id in &ids {
+        let result = (|| -> anyhow::Result<Downloaded> {
+            if let Some(path) = library.find_source(&wallhaven, id)? {
+                return Ok(Downloaded::AlreadyInLibrary(path));
+            }
+            let wallpaper = wallhaven.wallpaper(id).map_err(explain)?;
+            let mut progress = progress_line(id);
+            let downloaded = library.download(&wallhaven, &wallpaper, &folder, &mut progress);
+            progress_done();
+            Ok(downloaded?)
+        })();
+        match result {
+            Ok(Downloaded::Saved(path)) => {
+                println!("saved: {}", library.root().join(path).display())
+            }
+            Ok(Downloaded::AlreadyInLibrary(path)) => {
+                println!(
+                    "already in library: {}",
+                    library.root().join(path).display()
+                )
+            }
+            Err(error) => {
+                eprintln!("error: {id}: {error:#}");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} downloads failed", ids.len());
+    }
+    Ok(())
+}
+
+/// Shows download progress on one line of a terminal; elsewhere, nothing.
+fn progress_line(id: &str) -> impl FnMut(u64, Option<u64>) {
+    let terminal = io::IsTerminal::is_terminal(&io::stderr());
+    move |received, total| {
+        if !terminal {
+            return;
+        }
+        let status = match total {
+            Some(total) if total > 0 => format!(
+                "{}% of {}",
+                received * 100 / total,
+                format::file_size(total)
+            ),
+            _ => format::file_size(received),
+        };
+        eprint!("\r\x1b[Kdownloading {id}: {status}");
+    }
+}
+
+/// Clears the line [`progress_line`] drew.
+fn progress_done() {
+    if io::IsTerminal::is_terminal(&io::stderr()) {
+        eprint!("\r\x1b[K");
+    }
 }
 
 fn info(wallhaven: &Wallhaven, text: &str) -> anyhow::Result<()> {
@@ -398,6 +501,27 @@ mod tests {
     }
 
     #[test]
+    fn download_takes_wallpapers_and_a_folder() {
+        let args = Args::try_parse_from([
+            "backdrop",
+            "wallhaven",
+            "download",
+            "94x38z",
+            "https://whvn.cc/lygg6r",
+            "--to",
+            "dark",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Wallhaven {
+                command: WallhavenCommand::Download { wallpapers, to: Some(to) }
+            }) if wallpapers.len() == 2 && to == Path::new("dark")
+        ));
+        assert!(Args::try_parse_from(["backdrop", "wallhaven", "download"]).is_err());
+    }
+
+    #[test]
     fn api_key_set_can_read_the_key_later() {
         let args = Args::try_parse_from(["backdrop", "wallhaven", "api-key", "set"]).unwrap();
         assert!(matches!(
@@ -413,13 +537,14 @@ mod tests {
     #[test]
     fn api_key_set_and_clear_change_the_settings() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("settings.toml");
+        let paths = AppPaths::new(temp.path(), temp.path(), temp.path());
+        let file = paths.settings_file();
         let api_key = |command| WallhavenCommand::ApiKey {
             command: Some(command),
         };
 
         run(
-            &file,
+            &paths,
             api_key(ApiKeyCommand::Set {
                 key: Some("abc123".to_owned()),
             }),
@@ -430,7 +555,7 @@ mod tests {
             Some("abc123")
         );
 
-        run(&file, api_key(ApiKeyCommand::Clear)).unwrap();
+        run(&paths, api_key(ApiKeyCommand::Clear)).unwrap();
         assert_eq!(Settings::load(&file).unwrap().wallhaven_api_key(), None);
     }
 }

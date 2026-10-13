@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 backdrop-core.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono.workspace = true
 clap.workspace = true
 fastrand.workspace = true
 gpui-kit.workspace = true

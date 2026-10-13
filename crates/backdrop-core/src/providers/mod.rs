@@ -321,6 +321,10 @@ pub trait Provider: Send + Sync {
         progress: Progress,
     ) -> Result<u64, ProviderError>;
 
+    /// The file name a download of wallpaper `id` is saved as, with the
+    /// extension of its format, such as `jpg`.
+    fn file_name(&self, id: &str, extension: &str) -> String;
+
     /// The wallpaper id in a file name following the provider's naming
     /// convention, such as `wallhaven-94x38z.jpg`.
     fn id_from_file_name(&self, file_name: &str) -> Option<String>;
@@ -333,5 +337,34 @@ pub trait Provider: Send + Sync {
 impl fmt::Debug for dyn Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
+    }
+}
+
+#[cfg(test)]
+impl RemoteWallpaper {
+    /// A wallpaper of `provider` with id `id`, without tags, as in search
+    /// results.
+    pub(crate) fn for_test(provider: &'static str, id: &str) -> Self {
+        Self {
+            provider,
+            id: id.to_owned(),
+            page_url: format!("https://example.com/w/{id}"),
+            image_url: format!("https://example.com/full/{id}"),
+            thumbnail_url: format!("https://example.com/thumb/{id}"),
+            preview_url: format!("https://example.com/preview/{id}"),
+            width: 20,
+            height: 10,
+            file_size: None,
+            media_type: None,
+            rating: ContentRating::Sfw,
+            category: None,
+            uploaded: None,
+            uploader: None,
+            source_url: None,
+            views: None,
+            favorites: None,
+            colors: Vec::new(),
+            tags: None,
+        }
     }
 }

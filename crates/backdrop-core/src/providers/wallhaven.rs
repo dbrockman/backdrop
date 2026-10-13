@@ -228,6 +228,10 @@ impl Provider for Wallhaven {
         Ok(received)
     }
 
+    fn file_name(&self, id: &str, extension: &str) -> String {
+        format!("{FILE_PREFIX}{id}.{extension}")
+    }
+
     fn id_from_file_name(&self, file_name: &str) -> Option<String> {
         let (id, extension) = file_name.strip_prefix(FILE_PREFIX)?.split_once('.')?;
         let extension_ok =

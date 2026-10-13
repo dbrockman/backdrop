@@ -20,6 +20,15 @@ impl ImageFormat {
         }
     }
 
+    /// The usual file name extension, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "jpeg" => Some(Self::Jpeg),
