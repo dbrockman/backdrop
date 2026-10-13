@@ -1446,10 +1446,8 @@ mod tests {
         let fixture = open_browser(vec![vec!["aaa111", "bbb222"]], &[], cx);
 
         press(&fixture, "ctrl-f", cx);
-        cx.update_window(fixture.window, |_, window, cx| {
-            window.input("dunes", cx)
-        })
-        .unwrap();
+        cx.update_window(fixture.window, |_, window, cx| window.input("dunes", cx))
+            .unwrap();
         press(&fixture, "enter", cx);
         press(&fixture, "right", cx);
 

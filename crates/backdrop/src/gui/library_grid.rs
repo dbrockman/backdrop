@@ -100,6 +100,9 @@ pub struct LibraryGrid {
     image_cache: Entity<LruImageCache>,
     _load_task: Task<()>,
     _thumbnail_task: Option<Task<()>>,
+    /// The latest tag save. Each save waits for the one before, so quick
+    /// edits reach the metadata file in the order they were made.
+    tag_save: Option<Task<()>>,
 }
 
 impl LibraryGrid {
@@ -132,6 +135,7 @@ impl LibraryGrid {
             image_cache: LruImageCache::new(DECODED_THUMBNAILS, cx),
             _load_task: load_task,
             _thumbnail_task: None,
+            tag_save: None,
         }
     }
 
@@ -502,6 +506,59 @@ impl LibraryGrid {
             }
         })
         .detach();
+    }
+
+    /// The user's tags of the image at `path`.
+    pub fn tags(&self, path: &Path) -> &[String] {
+        self.marks.tags(path)
+    }
+
+    /// Replaces the user tags of the image at `path`. Shown at once, saved in
+    /// the background, and undone if saving fails.
+    pub fn set_tags(
+        &mut self,
+        path: PathBuf,
+        tags: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self.marks.tags(&path).to_vec();
+        self.set_tags_shown(&path, tags.clone(), cx);
+        let root = self.root.clone();
+        let database = self.paths.database_file();
+        let before = self.tag_save.take();
+        let save = cx.spawn_in(window, async move |this, cx| {
+            if let Some(before) = before {
+                before.await;
+            }
+            let saved_path = path.clone();
+            let result = cx
+                .background_spawn(async move {
+                    Library::open(&root, &database)?.set_tags(&saved_path, &tags)
+                })
+                .await;
+            this.update_in(cx, |grid, window, cx| match result {
+                // Shows the tags as stored, normalized.
+                Ok(stored) => grid.set_tags_shown(&path, stored, cx),
+                Err(error) => {
+                    grid.set_tags_shown(&path, previous, cx);
+                    window.push_notification(
+                        Notification::error(error.to_string()).title("Couldn’t change the tags"),
+                        cx,
+                    );
+                }
+            })
+            .ok();
+        });
+        self.tag_save = Some(save);
+    }
+
+    fn set_tags_shown(&mut self, path: &Path, tags: Vec<String>, cx: &mut Context<Self>) {
+        self.marks.set_tags(path, tags);
+        if !self.filter.tags().is_empty() {
+            self.apply_filter(cx);
+        }
+        cx.notify();
     }
 
     fn set_favorite_shown(&mut self, path: &Path, favorite: bool, cx: &mut Context<Self>) {

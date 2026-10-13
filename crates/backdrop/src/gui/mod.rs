@@ -16,7 +16,7 @@ use backdrop_core::providers::Wallhaven;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
-use image_detail::{Back, NextImage, PreviousImage};
+use image_detail::{Back, FocusTags, NextImage, PreviousImage};
 use library_grid::{
     DeleteSelected, OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight,
     SelectUp, SetWallpaper, ToggleFavorite,
@@ -100,6 +100,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", PreviousImage, Some(detail)),
         KeyBinding::new("right", NextImage, Some(detail)),
         KeyBinding::new("f", ToggleFavorite, Some(&detail_letters)),
+        KeyBinding::new("t", FocusTags, Some(&detail_letters)),
         KeyBinding::new("left", SelectLeft, Some(wallhaven)),
         KeyBinding::new("right", SelectRight, Some(wallhaven)),
         KeyBinding::new("up", SelectUp, Some(wallhaven)),

@@ -13,11 +13,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use backdrop_core::image::ImageFile;
-use backdrop_core::library::{ImageSource, Library};
+use backdrop_core::library::{ImageSource, Library, TagCount};
+use backdrop_core::metadata::{normalize_tag, same_tag};
 use backdrop_core::providers::Provider;
 use backdrop_core::snapshot::Snapshot;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tag::Tag;
@@ -34,7 +36,10 @@ use crate::format;
 
 pub const KEY_CONTEXT: &str = "ImageDetail";
 
-actions!(image_detail, [Back, PreviousImage, NextImage]);
+actions!(image_detail, [Back, PreviousImage, NextImage, FocusTags]);
+
+/// Suggestions shown under the tag field.
+const TAG_SUGGESTIONS: usize = 6;
 
 /// Emitted when the user leaves the view.
 pub struct BackToGrid;
@@ -63,6 +68,12 @@ pub struct ImageDetail {
     reading: Option<PathBuf>,
     /// Details are being fetched to link the shown image.
     linking: bool,
+    /// Adds a tag to the shown image.
+    tag_input: Entity<InputState>,
+    /// Every tag in the library, most used first, for suggestions.
+    tag_counts: Vec<TagCount>,
+    _tag_input_subscription: Subscription,
+    _tag_counts_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     image_cache: Entity<LruImageCache>,
     _grid_observation: Subscription,
@@ -74,8 +85,20 @@ impl ImageDetail {
         grid: Entity<LibraryGrid>,
         provider: Arc<dyn Provider>,
         database: PathBuf,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag…"));
+        let tag_input_subscription = cx.subscribe_in(
+            &tag_input,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.add_typed_tag(window, cx),
+                // Suggestions follow what is typed.
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        );
         let mut detail = Self {
             _grid_observation: cx.observe(&grid, |this, _, cx| {
                 this.read_provenance(cx);
@@ -87,12 +110,101 @@ impl ImageDetail {
             provenance: None,
             reading: None,
             linking: false,
+            tag_input,
+            tag_counts: Vec::new(),
+            _tag_input_subscription: tag_input_subscription,
+            _tag_counts_task: None,
             focus_handle: cx.focus_handle(),
             image_cache: LruImageCache::new(DECODED_IMAGES, cx),
             _provenance_task: None,
         };
         detail.read_provenance(cx);
+        detail.read_tag_counts(cx);
         detail
+    }
+
+    /// Reads every tag in the library, for suggestions.
+    fn read_tag_counts(&mut self, cx: &mut Context<Self>) {
+        let root = self.grid.read(cx).root().to_path_buf();
+        let database = self.database.clone();
+        self._tag_counts_task = Some(cx.spawn(async move |this, cx| {
+            let counts = cx
+                .background_spawn(async move { Library::open(&root, &database)?.tag_counts() })
+                .await;
+            // Without them there are no suggestions; tags still work.
+            if let Ok(counts) = counts {
+                this.update(cx, |detail, cx| {
+                    detail.tag_counts = counts;
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
+
+    /// Adds `tag` to the shown image, unless it has it already.
+    fn add_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.shown_path(cx) else {
+            return;
+        };
+        let Some(tag) = normalize_tag(tag) else {
+            return;
+        };
+        let mut tags = self.grid.read(cx).tags(&path).to_vec();
+        if !tags.iter().any(|existing| same_tag(existing, &tag)) {
+            tags.push(tag.clone());
+            self.grid
+                .update(cx, |grid, cx| grid.set_tags(path, tags, window, cx));
+            // A new tag becomes a suggestion for other images.
+            if !self
+                .tag_counts
+                .iter()
+                .any(|count| same_tag(count.name(), &tag))
+            {
+                self.read_tag_counts(cx);
+            }
+        }
+        self.tag_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    fn add_typed_tag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.tag_input.read(cx).value().to_string();
+        self.add_tag(&typed, window, cx);
+    }
+
+    fn remove_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.shown_path(cx) else {
+            return;
+        };
+        let tags = self
+            .grid
+            .read(cx)
+            .tags(&path)
+            .iter()
+            .filter(|existing| !same_tag(existing, tag))
+            .cloned()
+            .collect();
+        self.grid
+            .update(cx, |grid, cx| grid.set_tags(path, tags, window, cx));
+    }
+
+    /// Tags in the library that contain the typed text and the shown image
+    /// doesn't have, most used first.
+    fn tag_suggestions(&self, path: &Path, cx: &App) -> Vec<String> {
+        let typed = self.tag_input.read(cx).value().trim().to_lowercase();
+        if typed.is_empty() {
+            return Vec::new();
+        }
+        let has = self.grid.read(cx).tags(path);
+        self.tag_counts
+            .iter()
+            .map(TagCount::name)
+            .filter(|name| name.to_lowercase().contains(&typed))
+            .filter(|name| !has.iter().any(|tag| same_tag(tag, name)))
+            .take(TAG_SUGGESTIONS)
+            .map(str::to_owned)
+            .collect()
     }
 
     fn shown_path(&self, cx: &App) -> Option<PathBuf> {
@@ -278,6 +390,7 @@ impl ImageDetail {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let tags = self.render_tags(image.path(), cx);
         let source = self.render_source(image.path(), cx);
         let theme = cx.theme();
         let path = image.path();
@@ -399,11 +512,79 @@ impl ImageDetail {
                             })),
                     ),
             )
+            .child(tags)
             .children(source)
     }
 }
 
 impl ImageDetail {
+    /// The user's tags of the image, with a field to add more. Below the
+    /// actions, so they stay in place whatever the number of tags.
+    fn render_tags(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let suggestions = self.tag_suggestions(path, cx);
+        let tags = self.grid.read(cx).tags(path).to_vec();
+        let theme = cx.theme();
+        v_flex()
+            .gap_2()
+            .pt_4()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(div().text_sm().font_semibold().child("Tags"))
+            .map(|section| {
+                if tags.is_empty() {
+                    return section.child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No tags yet. Press T to add one."),
+                    );
+                }
+                section.child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(tags.into_iter().map(|tag| {
+                            let removed = tag.clone();
+                            Tag::secondary().small().child(
+                                h_flex().gap_1().child(tag.clone()).child(
+                                    Button::new(ElementId::Name(
+                                        format!("remove-tag-{tag}").into(),
+                                    ))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Close)
+                                    .tooltip(format!("Remove “{tag}”"))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.remove_tag(&removed, window, cx)
+                                        },
+                                    )),
+                                ),
+                            )
+                        })),
+                )
+            })
+            .child(Input::new(&self.tag_input).id("tag-input").small())
+            .when(!suggestions.is_empty(), |section| {
+                section.child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(suggestions.into_iter().map(|name| {
+                            let added = name.clone();
+                            Button::new(ElementId::Name(format!("suggest-tag-{name}").into()))
+                                .outline()
+                                .xsmall()
+                                .label(name)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.add_tag(&added, window, cx)
+                                }))
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
     /// Where the image came from and what its provider said about it, below
     /// the actions because it supplements the image rather than acting on it.
     fn render_source(&self, path: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -522,7 +703,18 @@ impl Render for ImageDetail {
             .id("image-detail")
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(|_, _: &Back, _, cx| cx.emit(BackToGrid)))
+            // Escape leaves the tag field first, and the view after.
+            .on_action(cx.listener(|this, _: &Back, window, cx| {
+                if this.tag_input.read(cx).focus_handle(cx).is_focused(window) {
+                    window.focus(&this.focus_handle, cx);
+                } else {
+                    cx.emit(BackToGrid)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FocusTags, window, cx| {
+                let focus_handle = this.tag_input.read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+            }))
             .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &NextImage, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {

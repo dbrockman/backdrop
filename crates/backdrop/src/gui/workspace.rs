@@ -434,7 +434,13 @@ impl Workspace {
             return;
         };
         let detail = cx.new(|cx| {
-            ImageDetail::new(grid, self.provider.clone(), self.paths.database_file(), cx)
+            ImageDetail::new(
+                grid,
+                self.provider.clone(),
+                self.paths.database_file(),
+                window,
+                cx,
+            )
         });
         self._detail_subscription = Some(cx.subscribe_in(
             &detail,
@@ -1127,5 +1133,71 @@ mod tests {
         });
         assert!(root.join("fake-aaa111.png").is_file());
         assert_eq!(provider.downloads(), 1, "no second download");
+    }
+    #[gpui_kit::test]
+    fn tags_are_added_suggested_and_removed_from_the_detail_view(cx: &mut TestAppContext) {
+        let (_dir, paths, window, workspace) = open_workspace(2, cx);
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().expect("grid after scan"));
+        let root = cx.update(|cx| grid.read(cx).root().to_path_buf());
+        let first = cx.update(|cx| grid.read(cx).images()[0].path().to_path_buf());
+        let second = cx.update(|cx| grid.read(cx).images()[1].path().to_path_buf());
+        let saved = |path: &std::path::Path| -> Vec<String> {
+            Library::open(&root, &paths.database_file())
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .get(path)
+                .map(|record| record.tags().to_vec())
+                .unwrap_or_default()
+        };
+        let act = |cx: &mut TestAppContext,
+                   act: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                act(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let first_name: SharedString = first.to_string_lossy().into_owned().into();
+        act(cx, &|window, cx| {
+            window.render_frame(cx);
+            window.click(first_name.clone(), cx);
+            window.press("enter", cx);
+        });
+
+        // T focuses the field; typed letters such as "f" are text, not shortcuts.
+        act(cx, &|window, cx| {
+            window.press("t", cx);
+            window.input("  Night   fog ", cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(saved(&first), ["Night fog"]);
+        assert!(!cx.update(|cx| grid.read(cx).is_favorite(&first)));
+        act(cx, &|window, cx| {
+            window.input("NIGHT FOG", cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(saved(&first), ["Night fog"], "tags ignore case");
+
+        // Escape leaves the field; the arrow keys then move to the next image.
+        act(cx, &|window, cx| {
+            window.press("escape", cx);
+            window.press("right", cx);
+        });
+        assert!(cx.update(|cx| workspace.read(cx).detail.is_some()));
+        assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(1));
+
+        // The tag is suggested for the next image.
+        act(cx, &|window, cx| {
+            window.press("t", cx);
+            window.input("nig", cx);
+        });
+        act(cx, &|window, cx| window.click("suggest-tag-Night fog", cx));
+        assert_eq!(saved(&second), ["Night fog"]);
+
+        act(cx, &|window, cx| window.click("remove-tag-Night fog", cx));
+        assert!(saved(&second).is_empty());
+        assert_eq!(saved(&first), ["Night fog"]);
     }
 }
