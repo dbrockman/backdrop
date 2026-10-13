@@ -70,6 +70,15 @@ fn bind_keys(cx: &mut App) {
     let detail = image_detail::KEY_CONTEXT;
     let wallhaven = wallhaven_browser::KEY_CONTEXT;
     let wallhaven_detail = wallhaven_detail::KEY_CONTEXT;
+    // Plain letters are also text: their shortcuts must not fire while a text
+    // field inside the view has focus, or typing "d" would download.
+    let letters = |context: &str| format!("{context} && !Input");
+    let (grid_letters, detail_letters, wallhaven_letters, wallhaven_detail_letters) = (
+        letters(grid),
+        letters(detail),
+        letters(wallhaven),
+        letters(wallhaven_detail),
+    );
     cx.bind_keys([
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("ctrl-o", ChooseLibraryFolder, Some(workspace::KEY_CONTEXT)),
@@ -81,28 +90,28 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", SelectDown, Some(grid)),
         KeyBinding::new("home", SelectFirst, Some(grid)),
         KeyBinding::new("end", SelectLast, Some(grid)),
-        KeyBinding::new("f", ToggleFavorite, Some(grid)),
+        KeyBinding::new("f", ToggleFavorite, Some(&grid_letters)),
         KeyBinding::new("enter", OpenSelected, Some(grid)),
-        KeyBinding::new("w", SetWallpaper, Some(grid)),
-        KeyBinding::new("w", SetWallpaper, Some(detail)),
+        KeyBinding::new("w", SetWallpaper, Some(&grid_letters)),
+        KeyBinding::new("w", SetWallpaper, Some(&detail_letters)),
         KeyBinding::new("delete", DeleteSelected, Some(grid)),
         KeyBinding::new("delete", DeleteSelected, Some(detail)),
         KeyBinding::new("escape", Back, Some(detail)),
         KeyBinding::new("left", PreviousImage, Some(detail)),
         KeyBinding::new("right", NextImage, Some(detail)),
-        KeyBinding::new("f", ToggleFavorite, Some(detail)),
+        KeyBinding::new("f", ToggleFavorite, Some(&detail_letters)),
         KeyBinding::new("left", SelectLeft, Some(wallhaven)),
         KeyBinding::new("right", SelectRight, Some(wallhaven)),
         KeyBinding::new("up", SelectUp, Some(wallhaven)),
         KeyBinding::new("down", SelectDown, Some(wallhaven)),
         KeyBinding::new("home", SelectFirst, Some(wallhaven)),
         KeyBinding::new("end", SelectLast, Some(wallhaven)),
-        KeyBinding::new("d", DownloadSelected, Some(wallhaven)),
+        KeyBinding::new("d", DownloadSelected, Some(&wallhaven_letters)),
         KeyBinding::new("ctrl-f", FocusSearch, Some(wallhaven)),
         KeyBinding::new("enter", OpenSelected, Some(wallhaven)),
         KeyBinding::new("escape", Back, Some(wallhaven_detail)),
         KeyBinding::new("left", PreviousImage, Some(wallhaven_detail)),
         KeyBinding::new("right", NextImage, Some(wallhaven_detail)),
-        KeyBinding::new("d", DownloadSelected, Some(wallhaven_detail)),
+        KeyBinding::new("d", DownloadSelected, Some(&wallhaven_detail_letters)),
     ]);
 }

@@ -1447,7 +1447,7 @@ mod tests {
 
         press(&fixture, "ctrl-f", cx);
         cx.update_window(fixture.window, |_, window, cx| {
-            window.input("mountains", cx)
+            window.input("dunes", cx)
         })
         .unwrap();
         press(&fixture, "enter", cx);
@@ -1455,7 +1455,7 @@ mod tests {
 
         let searches = fixture.provider.searches();
         assert_eq!(searches.len(), 2);
-        assert_eq!(searches[1].text, "mountains");
+        assert_eq!(searches[1].text, "dunes");
         assert_eq!(
             cx.update(|cx| fixture.browser.read(cx).selected_ix()),
             Some(0)
