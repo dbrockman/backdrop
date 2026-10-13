@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/backdrop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/dbrockman/backdrop"
+publish = false
+
+[workspace.dependencies]
+backdrop-core = { path = "crates/backdrop-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+gpui-kit = "=0.7.1"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# GPUI is slow unoptimized; keep debug builds usable.
+[profile.dev.package."*"]
+opt-level = 2
