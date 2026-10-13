@@ -673,7 +673,7 @@ The goal is a useful offline wallpaper browser.
 - [x] Noctalia wallpaper integration
 - [x] Highlight the current wallpaper
 - [x] Set wallpaper
-- [ ] Delete images using system trash
+- [x] Delete images using system trash
 - [ ] Basic shared CLI functionality
 
 ### Phase 2 — Wallhaven

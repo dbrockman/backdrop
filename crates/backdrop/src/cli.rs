@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::bail;
 use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::image::Orientation;
-use backdrop_core::library::{Library, LibraryScan};
+use backdrop_core::library::{Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::settings::{LibraryStatus, Settings};
@@ -37,6 +37,11 @@ pub enum Command {
         /// Only list favorites.
         #[arg(long)]
         favorites: bool,
+    },
+    /// Move images to the trash and remove them from the library.
+    Delete {
+        #[arg(required = true)]
+        images: Vec<PathBuf>,
     },
     /// Mark images as favorites.
     Favorite {
@@ -143,6 +148,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
                 .with_favorites_only(favorites);
             list(&paths, sort.into(), &filter)
         }
+        Command::Delete { images } => delete(&paths, &images),
         Command::Favorite { images } => set_favorite(&paths, &images, true),
         Command::Unfavorite { images } => set_favorite(&paths, &images, false),
         Command::Scan { remove_missing } => scan_command(&paths, remove_missing),
@@ -196,6 +202,27 @@ fn list(paths: &AppPaths, order: ImageOrder, filter: &ImageFilter) -> anyhow::Re
                 _ => Err(error.into()),
             };
         }
+    }
+    Ok(())
+}
+
+/// Moves images to the trash. All paths are checked before any is moved.
+fn delete(paths: &AppPaths, images: &[PathBuf]) -> anyhow::Result<()> {
+    let (mut library, _) = scan(paths)?;
+    let indexed = library.images(ImageOrder::Path)?;
+    let images = images
+        .iter()
+        .map(|image| {
+            let path = library.relative_path(image)?;
+            if !indexed.iter().any(|indexed| indexed.path() == path) {
+                bail!("{} is not an image in the library", image.display());
+            }
+            Ok(path)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for image in images {
+        library.delete_image(&image, &SystemTrash)?;
+        println!("moved to trash: {}", library.root().join(&image).display());
     }
     Ok(())
 }

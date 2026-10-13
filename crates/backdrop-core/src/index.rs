@@ -291,6 +291,13 @@ impl Index {
             .unwrap()
     }
 
+    /// Forgets the image at `path`, which has been removed from the library.
+    pub(crate) fn remove(&self, path: &Path) -> Result<(), IndexError> {
+        self.connection
+            .execute("DELETE FROM images WHERE path = ?1", [path_bytes(path)])?;
+        Ok(())
+    }
+
     /// The library root the index was last scanned for.
     fn root(&self) -> Result<Option<PathBuf>, IndexError> {
         let root: Option<Vec<u8>> = self

@@ -12,8 +12,8 @@ use gpui_kit::*;
 
 use image_detail::{Back, NextImage, PreviousImage};
 use library_grid::{
-    OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
-    SetWallpaper, ToggleFavorite,
+    DeleteSelected, OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight,
+    SelectUp, SetWallpaper, ToggleFavorite,
 };
 use workspace::{ChooseLibraryFolder, Workspace};
 
@@ -70,6 +70,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", OpenSelected, Some(grid)),
         KeyBinding::new("w", SetWallpaper, Some(grid)),
         KeyBinding::new("w", SetWallpaper, Some(detail)),
+        KeyBinding::new("delete", DeleteSelected, Some(grid)),
+        KeyBinding::new("delete", DeleteSelected, Some(detail)),
         KeyBinding::new("escape", Back, Some(detail)),
         KeyBinding::new("left", PreviousImage, Some(detail)),
         KeyBinding::new("right", NextImage, Some(detail)),

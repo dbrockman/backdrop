@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use backdrop_core::desktop::WallpaperBackend;
-use backdrop_core::library::{Library, LibraryScan};
+use backdrop_core::library::{Library, LibraryScan, SystemTrash};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::settings::{LibraryStatus, Settings};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -192,7 +192,7 @@ impl Workspace {
                 let paths = self.paths.clone();
                 let desktop = self.desktop.clone();
                 let grid = cx.new(|cx| {
-                    let mut grid = LibraryGrid::new(root, paths, cx);
+                    let mut grid = LibraryGrid::new(root, paths, Arc::new(SystemTrash), cx);
                     grid.set_desktop(desktop, cx);
                     grid
                 });
@@ -464,7 +464,12 @@ impl Workspace {
             Scan::Running => Some("Scanning…".to_owned()),
             Scan::Failed(_) => None,
             Scan::Finished(scan) => {
-                let images = count(scan.index().total(), "image", "images");
+                let total = self
+                    .grid
+                    .as_ref()
+                    .and_then(|grid| grid.read(cx).total())
+                    .unwrap_or(scan.index().total());
+                let images = count(total, "image", "images");
                 Some(match scan.index().issues().len() {
                     0 => images,
                     skipped => format!("{images} · {} skipped", count(skipped, "file", "files")),

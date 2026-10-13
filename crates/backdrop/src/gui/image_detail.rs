@@ -18,7 +18,7 @@ use gpui_kit::*;
 
 use super::format;
 use super::image_cache::LruImageCache;
-use super::library_grid::{LibraryGrid, SetWallpaper, ToggleFavorite};
+use super::library_grid::{DeleteSelected, LibraryGrid, SetWallpaper, ToggleFavorite};
 
 pub const KEY_CONTEXT: &str = "ImageDetail";
 
@@ -212,6 +212,17 @@ impl ImageDetail {
                             .outline()
                             .label("Show in Folder")
                             .on_click(move |_, _, cx| cx.reveal_path(&file)),
+                    )
+                    .child(
+                        Button::new("move-to-trash")
+                            .danger()
+                            .outline()
+                            .label("Move to Trash…")
+                            .tooltip("Delete")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.grid
+                                    .update(cx, |grid, cx| grid.confirm_delete_selected(window, cx))
+                            })),
                     ),
             )
     }
@@ -237,6 +248,10 @@ impl Render for ImageDetail {
             .on_action(cx.listener(|_, _: &Back, _, cx| cx.emit(BackToGrid)))
             .on_action(cx.listener(|this, _: &PreviousImage, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &NextImage, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
+                this.grid
+                    .update(cx, |grid, cx| grid.confirm_delete_selected(window, cx))
+            }))
             .on_action(cx.listener(|this, _: &SetWallpaper, window, cx| {
                 this.grid
                     .update(cx, |grid, cx| grid.set_selected_as_wallpaper(window, cx))

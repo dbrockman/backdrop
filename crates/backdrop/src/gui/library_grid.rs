@@ -13,12 +13,12 @@ use std::sync::Arc;
 use backdrop_core::desktop::WallpaperBackend;
 use backdrop_core::image::ImageFile;
 use backdrop_core::image::Orientation;
-use backdrop_core::library::Library;
+use backdrop_core::library::{Library, Trash};
 use backdrop_core::paths::AppPaths;
 use backdrop_core::query::{ImageFilter, ImageOrder};
 use backdrop_core::thumbnails::Thumbnails;
 use gpui_kit::component::button::{
-    Button, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
+    Button, ButtonVariant, ButtonVariants as _, Toggle, ToggleGroup, ToggleVariants as _,
 };
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -46,6 +46,7 @@ actions!(
         SelectLast,
         OpenSelected,
         SetWallpaper,
+        DeleteSelected,
         ToggleFavorite
     ]
 );
@@ -76,6 +77,8 @@ pub struct LibraryGrid {
     paths: AppPaths,
     /// Every image in the library, sorted by `order`.
     all: Vec<ImageFile>,
+    /// Whether `all` has been read from the index yet.
+    loaded: bool,
     /// The images shown: `all` narrowed by `filter`.
     images: Arc<Vec<ImageFile>>,
     order: ImageOrder,
@@ -88,6 +91,8 @@ pub struct LibraryGrid {
     /// The desktop shell, once detected; `None` while detecting or when no
     /// supported shell runs.
     desktop: Option<Arc<dyn WallpaperBackend>>,
+    /// Where deleted images go.
+    trash: Arc<dyn Trash>,
     /// The library image shown as the desktop wallpaper, if any.
     current_wallpaper: Option<PathBuf>,
     /// A request to set the wallpaper is in progress.
@@ -106,12 +111,18 @@ pub struct LibraryGrid {
 }
 
 impl LibraryGrid {
-    pub fn new(root: PathBuf, paths: AppPaths, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        paths: AppPaths,
+        trash: Arc<dyn Trash>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let load_task = Self::load(&root, &paths, ImageOrder::default(), cx);
         Self {
             root,
             paths,
             all: Vec::new(),
+            loaded: false,
             images: Arc::new(Vec::new()),
             order: ImageOrder::default(),
             filter: ImageFilter::default(),
@@ -119,6 +130,7 @@ impl LibraryGrid {
             thumbnails: HashMap::new(),
             selected: None,
             desktop: None,
+            trash,
             current_wallpaper: None,
             setting_wallpaper: false,
             width: px(0.),
@@ -158,6 +170,7 @@ impl LibraryGrid {
             };
             this.update(cx, |grid, cx| {
                 grid.all = images;
+                grid.loaded = true;
                 grid.favorites = favorites;
                 grid.apply_filter(cx);
             })
@@ -309,6 +322,90 @@ impl LibraryGrid {
             .ok();
         })
         .detach();
+    }
+
+    /// Images in the library, whether or not the filter shows them; `None`
+    /// until they have been read.
+    pub fn total(&self) -> Option<usize> {
+        self.loaded.then_some(self.all.len())
+    }
+
+    /// Asks whether to move the selected image to the trash.
+    pub fn confirm_delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        if self.selected_ix().is_none() {
+            return;
+        }
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned();
+        let title: SharedString = format!("Move “{name}” to Trash?").into();
+        let description: SharedString = if self.is_current_wallpaper(&path) {
+            "It’s your current wallpaper. You can restore it from the trash.".into()
+        } else {
+            "You can restore it from the trash.".into()
+        };
+        let grid = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let grid = grid.clone();
+            let path = path.clone();
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .confirm()
+                .ok_text("Move to Trash")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    grid.update(cx, |grid, cx| grid.delete_image(path.clone(), window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// Moves the image at `path` to the trash and takes it out of the grid,
+    /// selecting the image that took its place.
+    fn delete_image(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let database = self.paths.database_file();
+        let trash = self.trash.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let deleted = path.clone();
+            let result = cx
+                .background_spawn(async move {
+                    Library::open(&root, &database)?.delete_image(&deleted, trash.as_ref())
+                })
+                .await;
+            this.update_in(cx, |grid, window, cx| match result {
+                Ok(()) => grid.remove_from_view(&path, cx),
+                Err(error) => window.push_notification(
+                    Notification::error(error.to_string())
+                        .title("Couldn't move the image to the trash"),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn remove_from_view(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let ix = self.images.iter().position(|image| image.path() == path);
+        self.all.retain(|image| image.path() != path);
+        self.favorites.remove(path);
+        self.thumbnails.remove(path);
+        self.apply_filter(cx);
+        if self.selected.as_deref() == Some(path) {
+            self.selected = None;
+            if let Some(ix) = ix.filter(|_| !self.images.is_empty()) {
+                self.select(ix.min(self.images.len() - 1), cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Shows the selected image as the desktop wallpaper.
@@ -611,6 +708,9 @@ impl Render for LibraryGrid {
                 let last = grid.images.len().saturating_sub(1);
                 grid.select(last, cx)
             }))
+            .on_action(cx.listener(|grid, _: &DeleteSelected, window, cx| {
+                grid.confirm_delete_selected(window, cx)
+            }))
             .on_action(cx.listener(|grid, _: &SetWallpaper, window, cx| {
                 grid.set_selected_as_wallpaper(window, cx)
             }))
@@ -821,10 +921,23 @@ mod tests {
 
     use super::LibraryGrid;
 
+    /// A trash that moves files into a folder of its own.
+    struct FolderTrash(PathBuf);
+
+    impl backdrop_core::library::Trash for FolderTrash {
+        fn trash(&self, file: &std::path::Path) -> Result<(), String> {
+            std::fs::rename(file, self.0.join(file.file_name().unwrap()))
+                .map_err(|error| error.to_string())
+        }
+    }
+
     struct Fixture {
         _dir: tempfile::TempDir,
         root: PathBuf,
         paths: AppPaths,
+        /// The fake trash folder deleted images are moved to.
+        trash_dir: PathBuf,
+        trash: std::sync::Arc<dyn backdrop_core::library::Trash>,
     }
 
     /// A scanned library of `count` small landscape images.
@@ -851,10 +964,14 @@ mod tests {
             .unwrap()
             .scan()
             .unwrap();
+        let trash_dir = dir.path().join("trash");
+        std::fs::create_dir(&trash_dir).unwrap();
         Fixture {
             _dir: dir,
             root,
             paths,
+            trash: std::sync::Arc::new(FolderTrash(trash_dir.clone())),
+            trash_dir,
         }
     }
 
@@ -868,8 +985,14 @@ mod tests {
         });
         let mut grid = None;
         let handle = cx.open_window(size(px(800.), px(600.)), |window, cx| {
-            let view =
-                cx.new(|cx| LibraryGrid::new(fixture.root.clone(), fixture.paths.clone(), cx));
+            let view = cx.new(|cx| {
+                LibraryGrid::new(
+                    fixture.root.clone(),
+                    fixture.paths.clone(),
+                    fixture.trash.clone(),
+                    cx,
+                )
+            });
             grid = Some(view.clone());
             Root::new(view, window, cx)
         });
@@ -1064,5 +1187,43 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(*desktop.0.lock().unwrap(), None);
+    }
+
+    #[gpui_kit::test]
+    fn delete_asks_then_moves_the_selected_image_to_the_trash(cx: &mut TestAppContext) {
+        let fixture = library(3);
+        let (window, grid) = open_grid(&fixture, cx);
+        let second = cx.update(|cx| grid.read(cx).images()[1].path().to_path_buf());
+        let id: SharedString = second.to_string_lossy().into_owned().into();
+        let shown = |cx: &mut TestAppContext| cx.update(|cx| grid.read(cx).images().len());
+        let press_delete_then = |button: &'static str, cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| window.press("delete", cx))
+                .unwrap();
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click(button, cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.click(id.clone(), cx);
+        })
+        .unwrap();
+
+        press_delete_then("cancel", cx);
+        assert!(fixture.root.join(&second).exists());
+        assert_eq!(shown(cx), 3);
+
+        press_delete_then("ok", cx);
+        assert!(!fixture.root.join(&second).exists());
+        assert!(fixture.trash_dir.join(second.file_name().unwrap()).exists());
+        assert_eq!(shown(cx), 2);
+        assert_eq!(cx.update(|cx| grid.read(cx).total()), Some(2));
+        // The image that took its place is selected.
+        assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(1));
     }
 }

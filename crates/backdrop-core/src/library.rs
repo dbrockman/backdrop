@@ -33,6 +33,8 @@ pub enum LibraryError {
     Metadata(MetadataError),
     #[error("{} is not an image in the library", path.display())]
     NotInLibrary { path: PathBuf },
+    #[error("could not move {} to the trash: {message}", path.display())]
+    Trash { path: PathBuf, message: String },
     #[error("{} is not inside the library folder {}", path.display(), root.display())]
     OutsideLibrary { path: PathBuf, root: PathBuf },
     #[error("could not find {}: {cause}", path.display())]
@@ -97,6 +99,22 @@ impl Reconciliation {
     /// them.
     pub fn unconfirmed_removals(&self) -> &[PathBuf] {
         &self.unconfirmed_removals
+    }
+}
+
+/// Where deleted images go.
+pub trait Trash: Send + Sync {
+    /// Moves `file` out of the library so the user can still restore it.
+    fn trash(&self, file: &Path) -> Result<(), String>;
+}
+
+/// The desktop's trash (the freedesktop.org trash on Linux), from which file
+/// managers can restore files.
+pub struct SystemTrash;
+
+impl Trash for SystemTrash {
+    fn trash(&self, file: &Path) -> Result<(), String> {
+        trash::delete(file).map_err(|error| error.to_string())
     }
 }
 
@@ -203,6 +221,31 @@ impl Library {
 
     /// Removes the records for `paths` whose images are still missing, and
     /// returns how many were removed.
+    /// Moves the indexed image at `path` to `trash` and forgets it: its index
+    /// entry, its metadata record, and a provider snapshot nothing else uses.
+    ///
+    /// Once the file is in the trash this succeeds even if the metadata can't
+    /// be updated; the next scan removes the record of the missing image.
+    pub fn delete_image(&mut self, path: &Path, trash: &dyn Trash) -> Result<(), LibraryError> {
+        if !self.indexed_sizes()?.contains_key(path) {
+            return Err(LibraryError::NotInLibrary {
+                path: path.to_path_buf(),
+            });
+        }
+        let file = self.root.join(path);
+        trash.trash(&file).map_err(|message| LibraryError::Trash {
+            path: file,
+            message,
+        })?;
+        self.index.remove(path)?;
+        if let Ok((metadata, Some(record))) =
+            LibraryMetadata::update(&self.root, |metadata| Ok(metadata.remove(path)))
+        {
+            remove_orphaned_snapshots(&self.root, &metadata, &[record]);
+        }
+        Ok(())
+    }
+
     pub fn remove_missing(&mut self, paths: &[PathBuf]) -> Result<usize, LibraryError> {
         let indexed: HashSet<PathBuf> = self.indexed_sizes()?.into_keys().collect();
         let root = self.root.clone();
@@ -607,6 +650,86 @@ mod tests {
         assert!(reconciliation.removed().is_empty());
         assert!(reconciliation.unconfirmed_removals().is_empty());
         assert_eq!(fixture.favorites(), ["locked/a.png"]);
+    }
+
+    /// A trash that moves files into a folder of its own.
+    struct FolderTrash(PathBuf);
+
+    impl Trash for FolderTrash {
+        fn trash(&self, file: &Path) -> Result<(), String> {
+            let target = self.0.join(file.file_name().unwrap());
+            fs::rename(file, target).map_err(|error| error.to_string())
+        }
+    }
+
+    #[test]
+    fn deleting_moves_the_image_to_the_trash_and_forgets_it() {
+        let mut fixture = Fixture::new();
+        fixture.write("a.png", &png(10, 10, 1));
+        fixture.write("b.png", &png(10, 10, 2));
+        fixture.scan();
+        fixture
+            .library
+            .update_image(Path::new("a.png"), |record| {
+                record.set_favorite(true);
+                record.set_source(Some("wallhaven/abc123".into()));
+            })
+            .unwrap();
+        let snapshot = metadata::snapshot_file(fixture.root(), "wallhaven/abc123").unwrap();
+        fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        fs::write(&snapshot, "").unwrap();
+        let trash = tempfile::tempdir().unwrap();
+
+        fixture
+            .library
+            .delete_image(Path::new("a.png"), &FolderTrash(trash.path().into()))
+            .unwrap();
+
+        assert!(!fixture.root().join("a.png").exists());
+        assert!(trash.path().join("a.png").exists());
+        let paths: Vec<_> = fixture
+            .library
+            .images(ImageOrder::Path)
+            .unwrap()
+            .iter()
+            .map(|image| image.path().to_path_buf())
+            .collect();
+        assert_eq!(paths, [PathBuf::from("b.png")]);
+        assert!(fixture.library.metadata().unwrap().is_empty());
+        assert!(!snapshot.exists());
+    }
+
+    #[test]
+    fn only_indexed_images_can_be_deleted() {
+        let mut fixture = Fixture::new();
+        fixture.write("notes.txt", b"not an image");
+        fixture.scan();
+        let trash = tempfile::tempdir().unwrap();
+        let trash = FolderTrash(trash.path().into());
+
+        for path in ["notes.txt", "missing.png", "../outside.png"] {
+            assert!(matches!(
+                fixture.library.delete_image(Path::new(path), &trash),
+                Err(LibraryError::NotInLibrary { .. })
+            ));
+        }
+        assert!(fixture.root().join("notes.txt").exists());
+    }
+
+    #[test]
+    fn a_failed_trash_keeps_the_image() {
+        let mut fixture = Fixture::new();
+        fixture.write("a.png", &png(10, 10, 1));
+        fixture.scan();
+
+        let result = fixture.library.delete_image(
+            Path::new("a.png"),
+            &FolderTrash(fixture.root().join("no-such-folder")),
+        );
+
+        assert!(matches!(result, Err(LibraryError::Trash { .. })));
+        assert!(fixture.root().join("a.png").exists());
+        assert_eq!(fixture.library.images(ImageOrder::Path).unwrap().len(), 1);
     }
 
     #[test]
