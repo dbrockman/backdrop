@@ -11,6 +11,7 @@ use directories::ProjectDirs;
 const APPLICATION: &str = "backdrop";
 const DATABASE_FILE: &str = "library.sqlite3";
 const SETTINGS_FILE: &str = "settings.toml";
+const THEMES_DIR: &str = "themes";
 const THUMBNAILS_DIR: &str = "thumbnails";
 const REMOTE_THUMBNAILS_DIR: &str = "remote-thumbnails";
 const REMOTE_PREVIEWS_DIR: &str = "remote-previews";
@@ -69,6 +70,11 @@ impl AppPaths {
         self.config_dir.join(SETTINGS_FILE)
     }
 
+    /// Color themes for the GUI, added by the user.
+    pub fn themes_dir(&self) -> PathBuf {
+        self.config_dir.join(THEMES_DIR)
+    }
+
     pub fn database_file(&self) -> PathBuf {
         self.data_dir.join(DATABASE_FILE)
     }
@@ -97,6 +103,7 @@ mod tests {
         let paths = AppPaths::new("/config", "/data", "/cache");
 
         assert_eq!(paths.settings_file(), Path::new("/config/settings.toml"));
+        assert_eq!(paths.themes_dir(), Path::new("/config/themes"));
         assert_eq!(paths.database_file(), Path::new("/data/library.sqlite3"));
         assert_eq!(paths.thumbnails_dir(), Path::new("/cache/thumbnails"));
         assert_eq!(

@@ -13,7 +13,10 @@ backdrop-core.workspace = true
 chrono.workspace = true
 clap.workspace = true
 fastrand.workspace = true
+futures.workspace = true
 gpui-kit.workspace = true
+notify.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 backdrop-core = { workspace = true, features = ["test-support"] }

@@ -35,6 +35,36 @@ pub enum SettingsError {
 pub struct Settings {
     library: LibrarySettings,
     providers: ProviderSettings,
+    appearance: AppearanceSettings,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct AppearanceSettings {
+    #[serde(skip_serializing_if = "Appearance::is_system")]
+    mode: Appearance,
+    /// Names of the GUI's color themes; `None` is GPUI Kit's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    light_theme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dark_theme: Option<String>,
+}
+
+/// Whether the GUI is light, dark, or as the desktop is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Follows the desktop, switching when it does.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    fn is_system(&self) -> bool {
+        *self == Self::System
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +193,32 @@ impl Settings {
 
     pub fn set_wallhaven_hide_in_library(&mut self, hide: bool) {
         self.providers.wallhaven.hide_in_library = hide;
+    }
+
+    pub fn appearance(&self) -> Appearance {
+        self.appearance.mode
+    }
+
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.appearance.mode = appearance;
+    }
+
+    /// The name of the theme used when the GUI is light, if not the default.
+    pub fn light_theme(&self) -> Option<&str> {
+        self.appearance.light_theme.as_deref()
+    }
+
+    pub fn set_light_theme(&mut self, name: Option<&str>) {
+        self.appearance.light_theme = name.map(str::to_owned);
+    }
+
+    /// The name of the theme used when the GUI is dark, if not the default.
+    pub fn dark_theme(&self) -> Option<&str> {
+        self.appearance.dark_theme.as_deref()
+    }
+
+    pub fn set_dark_theme(&mut self, name: Option<&str>) {
+        self.appearance.dark_theme = name.map(str::to_owned);
     }
 
     /// Checks the configured library folder against the filesystem.
@@ -320,6 +376,31 @@ mod tests {
         assert!(Settings::load(&file).unwrap().wallhaven_hide_in_library());
         let text = fs::read_to_string(&file).unwrap();
         assert!(text.contains("hide_in_library = true"), "{text}");
+    }
+
+    #[test]
+    fn appearance_and_themes_round_trip_through_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("settings.toml");
+        assert_eq!(
+            Settings::load(&file).unwrap().appearance(),
+            Appearance::System
+        );
+
+        Settings::update(&file, |s| {
+            s.set_appearance(Appearance::Dark);
+            s.set_dark_theme(Some("Ayu Dark"));
+            Ok(())
+        })
+        .unwrap();
+        let settings = Settings::load(&file).unwrap();
+
+        assert_eq!(settings.appearance(), Appearance::Dark);
+        assert_eq!(settings.dark_theme(), Some("Ayu Dark"));
+        assert_eq!(settings.light_theme(), None);
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("mode = \"dark\""), "{text}");
+        assert!(!text.contains("light_theme"), "{text}");
     }
 
     #[test]

@@ -589,8 +589,11 @@ dependencies = [
  "chrono",
  "clap",
  "fastrand",
+ "futures",
  "gpui-kit",
  "image",
+ "notify",
+ "serde_json",
  "tempfile",
 ]
 

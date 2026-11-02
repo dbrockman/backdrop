@@ -1,9 +1,12 @@
 //! Graphical interface. Presentation only; behavior comes from `backdrop_core`.
 
 mod api_key_form;
+mod appearance;
 mod image_cache;
 mod image_detail;
 mod library_grid;
+mod settings_page;
+mod themes;
 mod tiles;
 mod wallhaven_browser;
 mod wallhaven_detail;
@@ -23,7 +26,7 @@ use library_grid::{
     SelectUp, SetWallpaper, ToggleFavorite,
 };
 use wallhaven_browser::{DownloadSelected, FocusSearch};
-use workspace::{ChooseLibraryFolder, ShowLibrary, ShowWallhaven, Workspace};
+use workspace::{ChooseLibraryFolder, ShowLibrary, ShowWallhaven, ToggleSettings, Workspace};
 
 const APP_ID: &str = "backdrop";
 const APP_NAME: &str = "Backdrop";
@@ -85,6 +88,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-o", ChooseLibraryFolder, Some(workspace::KEY_CONTEXT)),
         KeyBinding::new("ctrl-1", ShowLibrary, Some(workspace::KEY_CONTEXT)),
         KeyBinding::new("ctrl-2", ShowWallhaven, Some(workspace::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-,", ToggleSettings, Some(workspace::KEY_CONTEXT)),
+        KeyBinding::new("escape", Back, Some(settings_page::KEY_CONTEXT)),
         KeyBinding::new("left", SelectLeft, Some(grid)),
         KeyBinding::new("right", SelectRight, Some(grid)),
         KeyBinding::new("up", SelectUp, Some(grid)),

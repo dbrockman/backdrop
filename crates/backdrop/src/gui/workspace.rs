@@ -12,13 +12,16 @@ use gpui_kit::component::empty::{Empty, EmptyContent, EmptyDescription, EmptyHea
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, Selectable as _, Sizable as _, TitleBar, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::appearance::AppearanceSettings;
 use super::image_detail::{BackToGrid, ImageDetail};
 use super::library_grid::{LibraryGrid, OpenImage};
+use super::settings_page::{CloseSettings, SettingsPage};
 use super::wallhaven_browser::{LibraryChanged, LibraryLocation, OpenWallpaper, WallhavenBrowser};
 use super::wallhaven_detail::{BackToResults, WallhavenDetail};
 use crate::format::count;
@@ -28,7 +31,15 @@ pub const KEY_CONTEXT: &str = "Workspace";
 /// Full Wallhaven images kept in the cache for the detail view.
 const PREVIEWS_KEPT: usize = 30;
 
-actions!(backdrop, [ChooseLibraryFolder, ShowLibrary, ShowWallhaven]);
+actions!(
+    backdrop,
+    [
+        ChooseLibraryFolder,
+        ShowLibrary,
+        ShowWallhaven,
+        ToggleSettings
+    ]
+);
 
 /// What the window shows below its title bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +94,11 @@ pub struct Workspace {
     /// The Wallhaven result shown in full, over the results.
     wallhaven_detail: Option<Entity<WallhavenDetail>>,
     _wallhaven_detail_subscription: Option<Subscription>,
+    /// Applies the theme for the whole window's lifetime.
+    appearance: Entity<AppearanceSettings>,
+    /// Shown over either page while open.
+    settings_page: Option<Entity<SettingsPage>>,
+    _settings_page_subscription: Option<Subscription>,
     _activation_subscription: Subscription,
     focus_handle: FocusHandle,
 }
@@ -127,6 +143,9 @@ impl Workspace {
         });
 
         let settings_file = paths.settings_file();
+        let themes_dir = paths.themes_dir();
+        let appearance =
+            cx.new(|cx| AppearanceSettings::new(settings_file.clone(), &themes_dir, window, cx));
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move { Settings::load(&settings_file) })
@@ -165,6 +184,9 @@ impl Workspace {
             _wallhaven_subscriptions: Vec::new(),
             wallhaven_detail: None,
             _wallhaven_detail_subscription: None,
+            appearance,
+            settings_page: None,
+            _settings_page_subscription: None,
             _activation_subscription: activation,
             focus_handle,
         }
@@ -214,6 +236,8 @@ impl Workspace {
     /// search field focused the first time.
     pub fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
+        self.settings_page = None;
+        self._settings_page_subscription = None;
         let focus_handle = match page {
             Page::Library => self
                 .detail
@@ -237,6 +261,30 @@ impl Workspace {
             },
         };
         window.focus(&focus_handle, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn is_showing_settings(&self) -> bool {
+        self.settings_page.is_some()
+    }
+
+    /// Opens the settings over the current page, or closes them.
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_page.is_some() {
+            // Back to the page, with focus where it was.
+            return self.show_page(self.page, window, cx);
+        }
+        let appearance = self.appearance.clone();
+        let page = cx.new(|cx| SettingsPage::new(appearance, window, cx));
+        self._settings_page_subscription = Some(cx.subscribe_in(
+            &page,
+            window,
+            |this, _, _: &CloseSettings, window, cx| this.show_page(this.page, window, cx),
+        ));
+        let focus_handle = page.read(cx).focus_handle().clone();
+        window.focus(&focus_handle, cx);
+        self.settings_page = Some(page);
         cx.notify();
     }
 
@@ -756,6 +804,7 @@ fn empty_state(
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let library_page = self.page == Page::Library;
+        let settings = self.settings_page.is_some();
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
@@ -768,38 +817,71 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowWallhaven, window, cx| {
                 this.show_page(Page::Wallhaven, window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &ToggleSettings, window, cx| {
+                    this.toggle_settings(window, cx)
+                }),
+            )
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
                 TitleBar::new()
                     .child(h_flex().gap_3().child(self.render_pages(cx)).map(|row| {
-                        match library_page {
-                            true => row.children(self.render_detail_summary(cx).or_else(|| {
-                                self.render_library_summary(cx)
-                                    .map(IntoElement::into_any_element)
-                            })),
-                            false => row.children(self.render_wallhaven_summary(cx)),
+                        match (settings, library_page) {
+                            (true, _) => row.child("Settings"),
+                            (false, true) => {
+                                row.children(self.render_detail_summary(cx).or_else(|| {
+                                    self.render_library_summary(cx)
+                                        .map(IntoElement::into_any_element)
+                                }))
+                            }
+                            (false, false) => row.children(self.render_wallhaven_summary(cx)),
                         }
                     }))
-                    .when(
-                        library_page && self.grid.is_some() && self.detail.is_none(),
-                        |bar| {
-                            bar.child(
-                                Button::new("change-library-folder")
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .mr_2()
+                            .when(
+                                !settings
+                                    && library_page
+                                    && self.grid.is_some()
+                                    && self.detail.is_none(),
+                                |row| {
+                                    row.child(
+                                        Button::new("change-library-folder")
+                                            .ghost()
+                                            .small()
+                                            .label("Change Folder…")
+                                            .loading(self.choosing)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.choose_library_folder(window, cx)
+                                            })),
+                                    )
+                                },
+                            )
+                            .child(
+                                Button::new("settings")
                                     .ghost()
                                     .small()
-                                    .mr_2()
-                                    .label("Change Folder…")
-                                    .loading(self.choosing)
+                                    .icon(IconName::Settings)
+                                    .selected(settings)
+                                    .tooltip_with_action(
+                                        "Settings",
+                                        &ToggleSettings,
+                                        Some(KEY_CONTEXT),
+                                    )
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_library_folder(window, cx)
+                                        this.toggle_settings(window, cx)
                                     })),
-                            )
-                        },
+                            ),
                     ),
             )
             .child(v_flex().flex_1().min_h_0().map(|content| {
+                if let Some(page) = &self.settings_page {
+                    return content.child(page.clone());
+                }
                 match (self.page, &self.wallhaven, &self.wallhaven_detail) {
                     (Page::Wallhaven, _, Some(detail)) => content.child(detail.clone()),
                     (Page::Wallhaven, Some(browser), None) => content.child(browser.clone()),
@@ -968,6 +1050,42 @@ mod tests {
             .unwrap();
         assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(0));
     }
+    #[gpui_kit::test]
+    fn ctrl_comma_opens_the_settings_over_the_page_and_escape_closes_them(cx: &mut TestAppContext) {
+        let (_dir, _paths, window, workspace) = open_workspace(2, cx);
+        let showing =
+            |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).is_showing_settings());
+
+        cx.update_window(window, |_, window, cx| window.press("ctrl-,", cx))
+            .unwrap();
+        assert!(showing(cx));
+        cx.update_window(window, |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        assert!(!showing(cx));
+        // Focus is back in the grid, so arrow keys select images.
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().unwrap());
+        cx.update_window(window, |_, window, cx| window.press("right", cx))
+            .unwrap();
+        assert_eq!(cx.update(|cx| grid.read(cx).selected_ix()), Some(0));
+
+        // Switching pages leaves the settings too, and ctrl-, toggles them.
+        cx.update_window(window, |_, window, cx| window.press("ctrl-,", cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!showing(cx));
+        assert_eq!(
+            cx.update(|cx| workspace.read(cx).page()),
+            super::Page::Wallhaven
+        );
+        cx.update_window(window, |_, window, cx| window.press("ctrl-,", cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| window.press("ctrl-,", cx))
+            .unwrap();
+        assert!(!showing(cx));
+    }
+
     #[gpui_kit::test]
     fn get_details_links_a_recognized_image_and_shows_its_tags(cx: &mut TestAppContext) {
         // Named like a download from the fake provider, at the size its
