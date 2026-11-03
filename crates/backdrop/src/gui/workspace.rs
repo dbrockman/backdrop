@@ -21,7 +21,7 @@ use gpui_kit::*;
 use super::appearance::AppearanceSettings;
 use super::image_detail::{BackToGrid, ImageDetail};
 use super::library_grid::{LibraryGrid, OpenImage};
-use super::settings_page::{CloseSettings, SettingsPage};
+use super::settings_page::{ChangeLibraryFolder, CloseSettings, LibraryFolder, SettingsPage};
 use super::wallhaven_browser::{LibraryChanged, LibraryLocation, OpenWallpaper, WallhavenBrowser};
 use super::wallhaven_detail::{BackToResults, WallhavenDetail};
 use crate::format::count;
@@ -98,7 +98,7 @@ pub struct Workspace {
     appearance: Entity<AppearanceSettings>,
     /// Shown over either page while open.
     settings_page: Option<Entity<SettingsPage>>,
-    _settings_page_subscription: Option<Subscription>,
+    _settings_page_subscriptions: Vec<Subscription>,
     _activation_subscription: Subscription,
     focus_handle: FocusHandle,
 }
@@ -159,6 +159,7 @@ impl Workspace {
                 }
                 Err(error) => {
                     this.library = LibraryState::Unreadable(error.to_string().into());
+                    this.sync_settings_library(cx);
                     cx.notify();
                 }
             })
@@ -186,7 +187,7 @@ impl Workspace {
             _wallhaven_detail_subscription: None,
             appearance,
             settings_page: None,
-            _settings_page_subscription: None,
+            _settings_page_subscriptions: Vec::new(),
             _activation_subscription: activation,
             focus_handle,
         }
@@ -208,7 +209,27 @@ impl Workspace {
             let location = self.library_location();
             browser.update(cx, |browser, cx| browser.set_library(location, cx));
         }
+        self.sync_settings_library(cx);
         cx.notify();
+    }
+
+    /// The library folder, as the settings page shows it.
+    fn library_folder(&self) -> LibraryFolder {
+        LibraryFolder {
+            status: match &self.library {
+                LibraryState::Loaded(status) => Some(status.clone()),
+                LibraryState::Loading | LibraryState::Unreadable(_) => None,
+            },
+            choosing: self.choosing,
+        }
+    }
+
+    /// Shows the library folder's current state on the settings page, if open.
+    fn sync_settings_library(&self, cx: &mut Context<Self>) {
+        if let Some(page) = &self.settings_page {
+            let library = self.library_folder();
+            page.update(cx, |page, cx| page.set_library(library, cx));
+        }
     }
 
     /// Where Wallhaven downloads go, when a library folder is available.
@@ -237,7 +258,7 @@ impl Workspace {
     pub fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
         self.settings_page = None;
-        self._settings_page_subscription = None;
+        self._settings_page_subscriptions.clear();
         let focus_handle = match page {
             Page::Library => self
                 .detail
@@ -275,13 +296,21 @@ impl Workspace {
             // Back to the page, with focus where it was.
             return self.show_page(self.page, window, cx);
         }
+        let library = self.library_folder();
         let appearance = self.appearance.clone();
-        let page = cx.new(|cx| SettingsPage::new(appearance, window, cx));
-        self._settings_page_subscription = Some(cx.subscribe_in(
-            &page,
-            window,
-            |this, _, _: &CloseSettings, window, cx| this.show_page(this.page, window, cx),
-        ));
+        let page = cx.new(|cx| SettingsPage::new(library, appearance, window, cx));
+        self._settings_page_subscriptions = vec![
+            cx.subscribe_in(&page, window, |this, _, _: &CloseSettings, window, cx| {
+                this.show_page(this.page, window, cx)
+            }),
+            cx.subscribe_in(
+                &page,
+                window,
+                |this, _, _: &ChangeLibraryFolder, window, cx| {
+                    this.choose_library_folder(window, cx)
+                },
+            ),
+        ];
         let focus_handle = page.read(cx).focus_handle().clone();
         window.focus(&focus_handle, cx);
         self.settings_page = Some(page);
@@ -591,6 +620,7 @@ impl Workspace {
             return;
         }
         self.choosing = true;
+        self.sync_settings_library(cx);
         cx.notify();
 
         let picked = cx.prompt_for_paths(PathPromptOptions {
@@ -628,6 +658,7 @@ impl Workspace {
                     }
                     None => {}
                 }
+                this.sync_settings_library(cx);
                 cx.notify();
             })
             .ok();
@@ -840,42 +871,17 @@ impl Render for Workspace {
                         }
                     }))
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .mr_2()
-                            .when(
-                                !settings
-                                    && library_page
-                                    && self.grid.is_some()
-                                    && self.detail.is_none(),
-                                |row| {
-                                    row.child(
-                                        Button::new("change-library-folder")
-                                            .ghost()
-                                            .small()
-                                            .label("Change Folder…")
-                                            .loading(self.choosing)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.choose_library_folder(window, cx)
-                                            })),
-                                    )
-                                },
-                            )
-                            .child(
-                                Button::new("settings")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Settings)
-                                    .selected(settings)
-                                    .tooltip_with_action(
-                                        "Settings",
-                                        &ToggleSettings,
-                                        Some(KEY_CONTEXT),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_settings(window, cx)
-                                    })),
-                            ),
+                        div().mr_2().child(
+                            Button::new("settings")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Settings)
+                                .selected(settings)
+                                .tooltip_with_action("Settings", &ToggleSettings, Some(KEY_CONTEXT))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_settings(window, cx)
+                                })),
+                        ),
                     ),
             )
             .child(v_flex().flex_1().min_h_0().map(|content| {
@@ -1084,6 +1090,42 @@ mod tests {
         cx.update_window(window, |_, window, cx| window.press("ctrl-,", cx))
             .unwrap();
         assert!(!showing(cx));
+    }
+
+    #[gpui_kit::test]
+    fn the_settings_change_the_library_folder(cx: &mut TestAppContext) {
+        let (dir, paths, window, workspace) = open_workspace(2, cx);
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        RgbImage::from_pixel(8, 8, Rgb([0, 0, 0]))
+            .save(other.join("new.png"))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("change-library-folder").is_none(),
+                "the title bar has no folder button"
+            );
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("change-library-folder", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+
+        cx.simulate_path_prompt_response(|_| Some(vec![other.clone()]));
+        cx.run_until_parked();
+        let settings = Settings::load(&paths.settings_file()).unwrap();
+        assert_eq!(
+            settings.library_status(),
+            LibraryStatus::Available(other.clone())
+        );
+        assert!(
+            cx.update(|cx| workspace.read(cx).is_showing_settings()),
+            "the settings stay open"
+        );
+        let grid = cx.update(|cx| workspace.read(cx).grid.clone().unwrap());
+        assert_eq!(cx.update(|cx| grid.read(cx).root().to_path_buf()), other);
     }
 
     #[gpui_kit::test]

@@ -4,9 +4,12 @@
 //! GPUI Kit's `Settings` component would add a navigation sidebar and search
 //! for that one page.
 
+use backdrop_core::settings::LibraryStatus;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::group_box::GroupBox;
 use gpui_kit::component::label::Label;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::*;
 
 use super::appearance::AppearanceSettings;
@@ -20,19 +23,34 @@ const PAGE_MAX_WIDTH: f32 = 40.;
 /// The user asked to leave the settings.
 pub struct CloseSettings;
 
+/// The user asked to choose another library folder.
+pub struct ChangeLibraryFolder;
+
+/// The library folder as the workspace knows it.
+#[derive(Clone, Debug, Default)]
+pub struct LibraryFolder {
+    /// `None` while the settings are read, or when they can't be.
+    pub status: Option<LibraryStatus>,
+    /// A folder prompt or settings save is in progress.
+    pub choosing: bool,
+}
+
 pub struct SettingsPage {
+    library: LibraryFolder,
     appearance: Entity<AppearanceSettings>,
     focus_handle: FocusHandle,
 }
 
 impl SettingsPage {
     pub fn new(
+        library: LibraryFolder,
         appearance: Entity<AppearanceSettings>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         appearance.update(cx, |appearance, cx| appearance.sync_selects(window, cx));
         Self {
+            library,
             appearance,
             focus_handle: cx.focus_handle(),
         }
@@ -41,9 +59,48 @@ impl SettingsPage {
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
     }
+
+    pub fn set_library(&mut self, library: LibraryFolder, cx: &mut Context<Self>) {
+        self.library = library;
+        cx.notify();
+    }
+
+    fn render_library(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let danger = cx.theme().danger;
+        let (description, label) = match &self.library.status {
+            None => (div(), "Change Folder…"),
+            Some(LibraryStatus::NotChosen) => (div().child("Not chosen"), "Choose Folder…"),
+            Some(LibraryStatus::Missing(dir)) => (
+                div()
+                    .text_color(danger)
+                    .child(format!("Not found: {}", dir.display())),
+                "Choose Folder…",
+            ),
+            Some(LibraryStatus::Available(dir)) => {
+                (div().child(dir.display().to_string()), "Change Folder…")
+            }
+        };
+        let change = Button::new("change-library-folder")
+            .outline()
+            .label(label)
+            .disabled(self.library.status.is_none())
+            .loading(self.library.choosing)
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangeLibraryFolder)));
+        GroupBox::new()
+            .id("library")
+            .title("Library")
+            .child(setting_row(
+                "library-folder",
+                "Folder",
+                description,
+                change,
+                cx,
+            ))
+    }
 }
 
 impl EventEmitter<CloseSettings> for SettingsPage {}
+impl EventEmitter<ChangeLibraryFolder> for SettingsPage {}
 
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -60,6 +117,7 @@ impl Render for SettingsPage {
                     .px_4()
                     .py_6()
                     .gap_6()
+                    .child(self.render_library(cx))
                     .child(self.appearance.clone()),
             )
             .overflow_y_scrollbar()
