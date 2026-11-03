@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Backdrop
+GenericName=Wallpaper Manager
+Comment=Browse, organize, download, and set wallpapers
+Exec=backdrop
+Icon=backdrop
+Terminal=false
+Categories=Graphics;Viewer;
+Keywords=wallpaper;background;desktop;wallhaven;
+StartupWMClass=backdrop

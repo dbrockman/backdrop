@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b2f8f"/>
+      <stop offset="0.55" stop-color="#b9478f"/>
+      <stop offset="1" stop-color="#f59a5b"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe8a3"/>
+      <stop offset="1" stop-color="#ffc061"/>
+    </linearGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7a3d8c"/>
+      <stop offset="1" stop-color="#4f2a78"/>
+    </linearGradient>
+    <linearGradient id="near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c2463"/>
+      <stop offset="1" stop-color="#1a1640"/>
+    </linearGradient>
+    <clipPath id="picture">
+      <rect x="64" y="104" width="384" height="304" rx="36"/>
+    </clipPath>
+  </defs>
+
+  <!-- The wallpapers behind, as a stack of cards. -->
+  <rect x="104" y="56" width="304" height="40" rx="18" fill="#8b7fd6"/>
+  <rect x="84" y="76" width="344" height="40" rx="22" fill="#b3a8ef"/>
+
+  <!-- The wallpaper in front. -->
+  <g clip-path="url(#picture)">
+    <rect x="64" y="104" width="384" height="304" fill="url(#sky)"/>
+    <circle cx="318" cy="250" r="62" fill="url(#sun)"/>
+    <path d="M64 322 L170 228 L248 290 L330 214 L448 316 L448 408 L64 408 Z" fill="url(#far)"/>
+    <path d="M64 362 L150 300 L232 350 L314 288 L448 372 L448 408 L64 408 Z" fill="url(#near)"/>
+  </g>
+  <rect x="64" y="104" width="384" height="304" rx="36" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="4"/>
+</svg>

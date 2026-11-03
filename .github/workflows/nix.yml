@@ -1,0 +1,49 @@
+name: Nix package
+
+# Builds the flake's package and pushes it to the dbrockman Cachix cache, so
+# `nix profile install github:dbrockman/backdrop` downloads instead of compiling.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - flake.nix
+      - flake.lock
+      - packaging/**
+      - .github/workflows/nix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+
+      # Pulls from the cache, and pushes what the build adds when the token is
+      # available (not on pull requests from forks).
+      - uses: cachix/cachix-action@v17
+        with:
+          name: dbrockman
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build
+        run: nix build -L --accept-flake-config .#packages.${{ matrix.system }}.default
