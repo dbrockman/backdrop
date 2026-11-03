@@ -998,7 +998,7 @@ impl LibraryGrid {
                 let modifiers = event.modifiers();
                 if modifiers.shift {
                     grid.select_range(ix, cx);
-                } else if modifiers.secondary() {
+                } else if modifiers.secondary(cx) {
                     grid.toggle_selected(ix, cx);
                 } else {
                     grid.select(ix, cx);

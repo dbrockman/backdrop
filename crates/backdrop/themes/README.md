@@ -1,7 +1,7 @@
 # GPUI Kit themes
 
 These theme sets are copied unmodified from the `themes` folder of the GPUI Kit
-repository at tag `v0.7.1` (commit `87d10ae`), matching the `gpui-kit`
+repository at tag `v0.9.0` (commit `7591a35`), matching the `gpui-kit`
 dependency. They are Apache-2.0 licensed (`LICENSE-gpui-kit-APACHE`).
 
 `src/gui/themes.rs` embeds them in the binary. When upgrading `gpui-kit`,

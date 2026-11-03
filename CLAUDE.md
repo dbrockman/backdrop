@@ -56,11 +56,11 @@ GUI and CLI share the same settings and database, so the design must allow concu
 
 ## GPUI Kit
 
-`gpui-kit` is pinned to `=0.7.1`, and `Cargo.lock` pins `gpui-component`, `gpui-base`, `gpui-kit-assets` and `gpui-component-macros` to 0.7.1 too, matching the skills in `.claude/skills/` (downloaded from GPUI Kit v0.7.1) and the theme sets in `crates/backdrop/themes` (see its README). If upgrading, update the skills and themes alongside, and re-pin those crates after any `cargo update`.
+`gpui-kit` is pinned to `=0.9.0`, and `Cargo.lock` pins `gpui-component`, `gpui-base`, `gpui-kit-assets` and `gpui-component-macros` to 0.9.0 too, matching the skills in `.claude/skills/` (downloaded from GPUI Kit v0.9.0) and the theme sets in `crates/backdrop/themes` (see its README). If upgrading, update the skills and themes alongside, and re-pin those crates after any `cargo update`.
 
 - Use the `gpui-kit` skill for any GPUI code and the `gpui-kit-design-guides` skill before any UI/layout/copy work. Their Coding and Design Guides are normative.
 - Depend only on `gpui-kit`; GPUI is `use gpui_kit::*;`, components are `gpui_kit::component::…`.
-- Verify signatures in the 0.7.1 sources under `~/.cargo/registry/src/*/gpui-component-0.7.1` (and `gpui-pre-0.3.8` for GPUI itself) rather than guessing. Many Lucide icons aren't in the default bundle: `IconName` variants available by default are listed in `gpui-kit-assets-0.7.1/default-icons.txt`.
+- Verify signatures in the 0.9.0 sources under `~/.cargo/registry/src/*/gpui-component-0.9.0` (and `gpui-pre-0.3.11` for GPUI itself) rather than guessing. Many Lucide icons aren't in the default bundle: `IconName` variants available by default are listed in `gpui-kit-assets-0.9.0/default-icons.txt`.
 
 ## Conventions
 

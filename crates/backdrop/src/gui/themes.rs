@@ -181,11 +181,10 @@ mod tests {
     use super::*;
 
     fn theme(name: &str, mode: ThemeMode) -> Rc<ThemeConfig> {
-        Rc::new(ThemeConfig {
-            name: name.to_owned().into(),
-            mode,
-            ..Default::default()
-        })
+        let mut theme = ThemeConfig::default();
+        theme.name = name.to_owned().into();
+        theme.mode = mode;
+        Rc::new(theme)
     }
 
     fn defaults() -> [Rc<ThemeConfig>; 2] {
