@@ -22,6 +22,10 @@ The dev shell sets `LD_LIBRARY_PATH` because GPUI `dlopen`s Wayland, Vulkan, xkb
 
 `nix build` builds the installable package (`packages.default` in `flake.nix`, with the desktop file and SVG icon from `packaging/`, rendered to the hicolor PNG sizes at build time). Its check phase runs the whole workspace's tests in the Nix sandbox, so no test may need the network, `$HOME` or a real `noctalia`. `runtimeLibraries` feeds both the dev shell's `LD_LIBRARY_PATH` and the package's RPATH. The package `src` covers only `Cargo.toml`, `Cargo.lock` and `crates/`, so changes elsewhere don't invalidate the binary cache. The `Nix package` workflow pushes builds of `main` to the `dbrockman` Cachix cache.
 
+## Releases
+
+release-plz (`release-plz.toml`, `.github/workflows/release.yml`) keeps a "Release vX.Y.Z" PR open that bumps the workspace version and updates `CHANGELOG.md`. Merging it tags `vX.Y.Z` and creates the GitHub release. Both crates share one version (`version_group`), and only `backdrop` is tagged, released and given a changelog, which includes `backdrop-core`'s commits. Commit messages are plain imperative sentences, and the git-cliff `[changelog]` section groups them by their first word (Add → Added, Fix → Fixed, Remove or Drop → Removed, anything else → Changed). Commits starting with `chore:`, `ci:` or `build:` are left out. release-plz proposes a patch bump. For a minor release, set the version in `[workspace.package]` and `[workspace.dependencies]` in an ordinary commit, and release-plz uses it. Don't edit the release PR, because release-plz regenerates it from `main`. The previous version comes from git tags (`git_only`), and nothing is published to crates.io. `backdrop-core` carries a `version` in `[workspace.dependencies]` because release-plz runs `cargo package`. The workflow authenticates as the `dbrockman-release-bot` GitHub App (`RELEASE_APP_CLIENT_ID` variable, `RELEASE_APP_PRIVATE_KEY` secret), because PRs and tags made with `GITHUB_TOKEN` don't start other workflows.
+
 ## Architecture
 
 Two crates; dependencies point one way: **backdrop → backdrop-core**.

@@ -1,0 +1,71 @@
+# release-plz keeps a release PR open that bumps the version and updates
+# CHANGELOG.md. Merging it tags `vX.Y.Z` and creates the GitHub release.
+# See .github/workflows/release.yml.
+
+[workspace]
+# Nothing goes to crates.io; the previous version comes from git tags.
+git_only = true
+publish = false
+# The crates have no public API to check.
+semver_check = false
+# Only release when the release PR is merged, not on every push to main.
+release_always = false
+# Both crates are released together under the app's tag, so a change to
+# backdrop-core also bumps the app. Only the app gets a tag, a GitHub release
+# and the changelog.
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+pr_name = "Release v{{ version }}"
+pr_labels = ["release"]
+
+[[package]]
+name = "backdrop-core"
+version_group = "backdrop"
+
+[[package]]
+name = "backdrop"
+version_group = "backdrop"
+git_tag_enable = true
+git_release_enable = true
+git_release_name = "v{{ version }}"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+# The app is built from both crates, so its changelog lists backdrop-core's
+# changes too.
+changelog_include = ["backdrop-core"]
+
+# git-cliff configuration (release-plz renders the changelog with git-cliff).
+# Commit messages here are plain imperative sentences rather than
+# Conventional Commits, so they are grouped by their first word.
+[changelog]
+header = """# Changelog
+
+All notable changes to this project are documented in this file. The project
+follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+body = """
+## [{{ version }}]\
+    {%- if release_link -%}({{ release_link }}){% endif %} \
+    - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim | upper_first }}\
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^Merge (pull request|branch)", skip = true },
+  { message = "^Release v", skip = true },
+  { message = "^(chore|ci|build)(\\(.*\\))?:", skip = true },
+  { message = "^(Add|Support|Show|Allow|Introduce|Package|feat)", group = "<!-- 0 -->Added" },
+  { message = "^(Fix|Correct|Repair|fix)", group = "<!-- 1 -->Fixed" },
+  # "Delete" isn't here: in Backdrop it means deleting images, a feature.
+  { message = "^(Remove|Drop)", group = "<!-- 2 -->Removed" },
+  { message = ".*", group = "<!-- 3 -->Changed" },
+]
