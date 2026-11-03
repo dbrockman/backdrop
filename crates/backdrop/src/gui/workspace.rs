@@ -18,8 +18,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::api_key_form::ApiKeyChanged;
 use super::appearance::AppearanceSettings;
-use super::image_detail::{BackToGrid, ImageDetail};
+use super::image_detail::{Back, BackToGrid, ImageDetail};
 use super::library_grid::{LibraryGrid, OpenImage};
 use super::settings_page::{ChangeLibraryFolder, CloseSettings, LibraryFolder, SettingsPage};
 use super::wallhaven_browser::{LibraryChanged, LibraryLocation, OpenWallpaper, WallhavenBrowser};
@@ -220,6 +221,7 @@ impl Workspace {
                 LibraryState::Loaded(status) => Some(status.clone()),
                 LibraryState::Loading | LibraryState::Unreadable(_) => None,
             },
+            unreadable: matches!(self.library, LibraryState::Unreadable(_)),
             choosing: self.choosing,
         }
     }
@@ -298,7 +300,10 @@ impl Workspace {
         }
         let library = self.library_folder();
         let appearance = self.appearance.clone();
-        let page = cx.new(|cx| SettingsPage::new(library, appearance, window, cx));
+        let provider = self.provider.clone();
+        let settings_file = self.paths.settings_file();
+        let page = cx
+            .new(|cx| SettingsPage::new(library, appearance, provider, settings_file, window, cx));
         self._settings_page_subscriptions = vec![
             cx.subscribe_in(&page, window, |this, _, _: &CloseSettings, window, cx| {
                 this.show_page(this.page, window, cx)
@@ -310,6 +315,12 @@ impl Workspace {
                     this.choose_library_folder(window, cx)
                 },
             ),
+            // NSFW results depend on the key.
+            cx.subscribe(&page, |this, _, _: &ApiKeyChanged, cx| {
+                if let Some(browser) = &this.wallhaven {
+                    browser.update(cx, |browser, cx| browser.api_key_changed(cx));
+                }
+            }),
         ];
         let focus_handle = page.read(cx).focus_handle().clone();
         window.focus(&focus_handle, cx);
@@ -410,7 +421,11 @@ impl Workspace {
                         .small()
                         .icon(IconName::ChevronLeft)
                         .label("Results")
-                        .tooltip("Back to the results (Esc)")
+                        .tooltip_with_action(
+                            "Back to the results",
+                            &Back,
+                            Some(super::wallhaven_detail::KEY_CONTEXT),
+                        )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.close_wallhaven_detail(window, cx)
                         })),
@@ -459,7 +474,7 @@ impl Workspace {
                         Ok(_) => {}
                         Err(error) => window.push_notification(
                             Notification::error(error.to_string())
-                                .title("Couldn't update the library metadata"),
+                                .title("Couldn’t update the library metadata"),
                             cx,
                         ),
                     }
@@ -604,7 +619,7 @@ impl Workspace {
                 cx.update(|window, cx| {
                     window.push_notification(
                         Notification::error(error.to_string())
-                            .title("Couldn't remove the metadata"),
+                            .title("Couldn’t remove the metadata"),
                         cx,
                     )
                 })
@@ -641,13 +656,13 @@ impl Workspace {
                             .map(|(settings, _)| settings.library_status())
                         })
                         .await
-                        .map_err(|error| ("Couldn't change the library folder", error.to_string())),
+                        .map_err(|error| ("Couldn’t change the library folder", error.to_string())),
                     ),
                     None => None,
                 },
                 // Cancelled, or the prompt went away with the window.
                 Ok(Ok(None)) | Err(_) => None,
-                Ok(Err(error)) => Some(Err(("Couldn't open the folder picker", error.to_string()))),
+                Ok(Err(error)) => Some(Err(("Couldn’t open the folder picker", error.to_string()))),
             };
             this.update_in(cx, |this, window, cx| {
                 this.choosing = false;
@@ -670,7 +685,7 @@ impl Workspace {
         let status = match &self.library {
             LibraryState::Loading => return div().into_any_element(),
             LibraryState::Unreadable(message) => {
-                return empty_state("Couldn't read settings", message.clone(), None)
+                return empty_state("Couldn’t read settings", message.clone(), None)
                     .into_any_element();
             }
             LibraryState::Loaded(status) => status,
@@ -684,12 +699,12 @@ impl Workspace {
             LibraryStatus::NotChosen => empty_state(
                 "Choose a wallpaper folder",
                 "Backdrop shows the images in it and its subfolders. Files stay where they are.",
-                Some(choose.primary().label("Choose Folder…")),
+                Some(choose.label("Choose Folder…")),
             ),
             LibraryStatus::Missing(dir) => empty_state(
                 "Library folder not found",
                 dir.display().to_string(),
-                Some(choose.primary().label("Choose Folder…")),
+                Some(choose.label("Choose Folder…")),
             ),
             LibraryStatus::Available(_) => {
                 if let Some(detail) = &self.detail {
@@ -701,7 +716,7 @@ impl Workspace {
                 match &self.scan {
                     Scan::Running => empty_state("Scanning…", "", None),
                     Scan::Failed(message) => empty_state(
-                        "Couldn't scan the library",
+                        "Couldn’t scan the library",
                         message.clone(),
                         Some(choose.outline().label("Change Folder…")),
                     ),
@@ -717,7 +732,6 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// The library folder's name and image count, for the title bar.
     /// A way back to the grid and the shown image's position, for the title
     /// bar.
     fn render_detail_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -745,7 +759,11 @@ impl Workspace {
                         .small()
                         .icon(IconName::ChevronLeft)
                         .label(folder)
-                        .tooltip("Back to all images (Esc)")
+                        .tooltip_with_action(
+                            "Back to all images",
+                            &Back,
+                            Some(super::image_detail::KEY_CONTEXT),
+                        )
                         .on_click(cx.listener(|this, _, window, cx| this.close_detail(window, cx))),
                 )
                 .when_some(position, |row, position| {
@@ -759,7 +777,8 @@ impl Workspace {
         )
     }
 
-    /// The switch between the library and Wallhaven.
+    /// The switch between the library and Wallhaven. While the settings are
+    /// open, neither page is shown, so neither tab is selected.
     fn render_pages(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = match self.page {
             Page::Library => 0,
@@ -768,7 +787,9 @@ impl Workspace {
         TabBar::new("pages")
             .segmented()
             .small()
-            .selected_index(selected)
+            .when(self.settings_page.is_none(), |tabs| {
+                tabs.selected_index(selected)
+            })
             .child(Tab::new().label("Library"))
             .child(Tab::new().label("Wallhaven"))
             .on_click(cx.listener(|this, ix: &usize, window, cx| {
@@ -781,6 +802,7 @@ impl Workspace {
             }))
     }
 
+    /// The library folder's name and image count, for the title bar.
     fn render_library_summary(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let LibraryState::Loaded(LibraryStatus::Available(dir)) = &self.library else {
             return None;
@@ -899,8 +921,11 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use backdrop_core::library::Library;
     use backdrop_core::paths::AppPaths;
+    use backdrop_core::providers::{ContentRating, Provider as _};
     use backdrop_core::query::ImageFilter;
     use backdrop_core::settings::LibraryStatus;
     use backdrop_core::settings::Settings;
@@ -910,6 +935,7 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::Workspace;
+    use crate::test_provider::FakeProvider;
 
     /// A workspace whose library folder holds `count` small images.
     fn open_workspace(
@@ -1126,6 +1152,105 @@ mod tests {
         );
         let grid = cx.update(|cx| workspace.read(cx).grid.clone().unwrap());
         assert_eq!(cx.update(|cx| grid.read(cx).root().to_path_buf()), other);
+    }
+
+    /// Opens the settings, then the API key dialog, and types `key` into it.
+    fn enter_api_key(window: gpui_kit::AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("api-key", cx);
+            window.render_frame(cx);
+            window.input(key, cx);
+        })
+        .unwrap();
+    }
+
+    fn api_key_dialog_is_open(window: gpui_kit::AnyWindowHandle, cx: &mut TestAppContext) -> bool {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("api-key-input").is_some()
+        })
+        .unwrap()
+    }
+
+    fn saved_api_key(paths: &AppPaths) -> Option<String> {
+        Settings::load(&paths.settings_file())
+            .unwrap()
+            .wallhaven_api_key()
+            .map(str::to_owned)
+    }
+
+    #[gpui_kit::test]
+    fn the_settings_save_and_remove_the_api_key(cx: &mut TestAppContext) {
+        let provider = Arc::new(FakeProvider::new(Vec::new()));
+        let (_dir, paths, window, _) =
+            open_workspace_with(&[], Vec::new(), Some(provider.clone()), cx);
+
+        enter_api_key(window, "abc123", cx);
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(saved_api_key(&paths).as_deref(), Some("abc123"));
+        assert_eq!(provider.api_key().as_deref(), Some("abc123"));
+        assert!(!api_key_dialog_is_open(window, cx));
+
+        cx.update_window(window, |_, window, cx| {
+            window.click("api-key", cx);
+            window.render_frame(cx);
+            window.click("remove-api-key", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(saved_api_key(&paths), None);
+        assert_eq!(provider.api_key(), None);
+        assert!(!api_key_dialog_is_open(window, cx));
+    }
+
+    #[gpui_kit::test]
+    fn a_rejected_api_key_stays_in_the_dialog(cx: &mut TestAppContext) {
+        let provider = Arc::new(FakeProvider::new(Vec::new()).rejecting("wrong"));
+        let (_dir, paths, window, _) =
+            open_workspace_with(&[], Vec::new(), Some(provider.clone()), cx);
+
+        enter_api_key(window, "wrong", cx);
+        cx.update_window(window, |_, window, cx| window.click("save-api-key", cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(saved_api_key(&paths), None);
+        assert_eq!(provider.api_key(), None);
+        assert!(api_key_dialog_is_open(window, cx));
+    }
+
+    #[gpui_kit::test]
+    fn removing_the_api_key_in_the_settings_turns_nsfw_off(cx: &mut TestAppContext) {
+        let provider = Arc::new(FakeProvider::new(vec![vec!["aaa111"]]));
+        let (_dir, _paths, window, workspace) =
+            open_workspace_with(&[], Vec::new(), Some(provider.clone()), cx);
+        provider.set_api_key(Some("abc123".to_owned()));
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-2", cx);
+            window.render_frame(cx);
+            window.click("NSFW", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let browser = cx.update(|cx| workspace.read(cx).wallhaven().unwrap().clone());
+        let ratings = |cx: &mut TestAppContext| cx.update(|cx| browser.read(cx).ratings());
+        assert!(ratings(cx).contains(&ContentRating::Nsfw));
+
+        cx.update_window(window, |_, window, cx| {
+            window.press("ctrl-,", cx);
+            window.render_frame(cx);
+            window.click("api-key", cx);
+            window.render_frame(cx);
+            window.click("remove-api-key", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(ratings(cx), [ContentRating::Sfw]);
     }
 
     #[gpui_kit::test]

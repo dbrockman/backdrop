@@ -26,7 +26,6 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -471,10 +470,10 @@ impl LibraryGrid {
                         };
                         let failed = deletion.failed().len();
                         let title = if count == 1 {
-                            "Couldn't move the image to the trash".to_owned()
+                            "Couldn’t move the image to the trash".to_owned()
                         } else {
                             format!(
-                                "Couldn't move {} of {} images to the trash",
+                                "Couldn’t move {} of {} images to the trash",
                                 format::grouped(failed),
                                 format::grouped(count)
                             )
@@ -482,7 +481,7 @@ impl LibraryGrid {
                         (title, message.clone())
                     }
                     Err(error) => (
-                        "Couldn't move the images to the trash".to_owned(),
+                        "Couldn’t move the images to the trash".to_owned(),
                         error.to_string(),
                     ),
                 };
@@ -545,7 +544,7 @@ impl LibraryGrid {
                 match result {
                     Ok(()) => grid.current_wallpaper = Some(path),
                     Err(error) => window.push_notification(
-                        Notification::error(error.to_string()).title("Couldn't set the wallpaper"),
+                        Notification::error(error.to_string()).title("Couldn’t set the wallpaper"),
                         cx,
                     ),
                 }
@@ -722,7 +721,7 @@ impl LibraryGrid {
                     grid.set_favorite_shown(&path, !favorite, cx);
                     window.push_notification(
                         Notification::error(error.to_string())
-                            .title("Couldn't change the favorite"),
+                            .title("Couldn’t change the favorite"),
                         cx,
                     );
                 })
@@ -950,7 +949,7 @@ impl LibraryGrid {
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(Icon::new(IconName::TriangleAlert).small())
-                .child("Can't show this image")
+                .child("Can’t show this image")
                 .into_any_element(),
             None => div().into_any_element(),
         };
@@ -970,7 +969,7 @@ impl LibraryGrid {
                         .p_1()
                         .rounded_full()
                         .bg(theme.background.opacity(0.8))
-                        .text_color(theme.warning)
+                        .text_color(theme.yellow)
                         .child(Icon::new(IconName::StarFill).small()),
                 )
             })
@@ -992,7 +991,7 @@ impl LibraryGrid {
                 (false, true) => tile.child(tiles::current_ring(rem, cx)),
                 (false, false) => tile,
             })
-            .tooltip(move |window, cx| Tooltip::new(name.clone()).build(window, cx))
+            .aria_label(name)
             .on_click(cx.listener(move |grid, event: &ClickEvent, window, cx| {
                 window.focus(&grid.focus_handle, cx);
                 let modifiers = event.modifiers();
@@ -1151,6 +1150,7 @@ impl LibraryGrid {
                 ToggleGroup::new("orientation")
                     .segmented()
                     .outline()
+                    .small()
                     .children(ORIENTATIONS.iter().map(|(candidate, name)| {
                         Toggle::new(*name)
                             .label(*name)
@@ -1176,6 +1176,7 @@ impl LibraryGrid {
             .child(
                 Toggle::new("favorites-only")
                     .outline()
+                    .small()
                     .label("Favorites")
                     .checked(self.filter.is_favorites_only())
                     .on_click(cx.listener(|grid, checked: &bool, _, cx| {
@@ -1187,6 +1188,7 @@ impl LibraryGrid {
                 Input::new(&self.tag_query)
                     .id("tag-filter")
                     .w_48()
+                    .small()
                     .prefix(Icon::new(IconName::Search).small()),
             )
             .child(div().flex_1())
@@ -1209,7 +1211,11 @@ impl LibraryGrid {
                             .outline()
                             .small()
                             .label("Move to Trash…")
-                            .tooltip("Delete")
+                            .tooltip_with_action(
+                                "Move the selected images to the trash",
+                                &DeleteSelected,
+                                Some(KEY_CONTEXT),
+                            )
                             .on_click(cx.listener(|grid, _, window, cx| {
                                 grid.confirm_delete_selected(window, cx)
                             })),
@@ -1219,7 +1225,7 @@ impl LibraryGrid {
                             .ghost()
                             .small()
                             .label("Deselect")
-                            .tooltip("Esc")
+                            .tooltip_with_action("Deselect", &Dismiss, Some(KEY_CONTEXT))
                             .on_click(cx.listener(|grid, _, _, cx| grid.collapse_selection(cx))),
                     )
             })

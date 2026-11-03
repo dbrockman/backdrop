@@ -40,7 +40,6 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::api_key_form::{ApiKeyChanged, ApiKeyForm};
 use super::image_cache::LruImageCache;
 use super::library_grid::{
     OpenSelected, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
@@ -167,7 +166,6 @@ pub struct WallhavenBrowser {
     focus_handle: FocusHandle,
     image_cache: Entity<LruImageCache>,
     _query_subscription: Subscription,
-    _api_key_subscription: Option<Subscription>,
     _search_task: Option<Task<()>>,
     _thumbnail_task: Option<Task<()>>,
     _library_task: Option<Task<()>>,
@@ -229,7 +227,6 @@ impl WallhavenBrowser {
             focus_handle: cx.focus_handle(),
             image_cache: LruImageCache::new(DECODED_THUMBNAILS, cx),
             _query_subscription: query_subscription,
-            _api_key_subscription: None,
             _search_task: None,
             _thumbnail_task: None,
             _library_task: None,
@@ -566,7 +563,8 @@ impl WallhavenBrowser {
     }
 
     /// Without a key, NSFW can't be searched, so removing the key turns it off.
-    fn api_key_changed(&mut self, cx: &mut Context<Self>) {
+    /// The key is set on the settings page.
+    pub fn api_key_changed(&mut self, cx: &mut Context<Self>) {
         let ratings = self.query.effective_ratings();
         if !self.provider.has_api_key() && ratings.contains(&ContentRating::Nsfw) {
             self.query.ratings = ratings
@@ -604,36 +602,6 @@ impl WallhavenBrowser {
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus_handle = self.query_input.read(cx).focus_handle(cx);
         window.focus(&focus_handle, cx);
-    }
-
-    /// Opens the dialog for the API key, with its field focused.
-    pub fn open_api_key_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let provider = self.provider.clone();
-        let settings_file = self.settings_file.clone();
-        let form = cx.new(|cx| ApiKeyForm::new(provider, settings_file, window, cx));
-        // The toolbar names whether a key is set, and NSFW depends on one.
-        self._api_key_subscription = Some(cx.subscribe(&form, |this, _, _: &ApiKeyChanged, cx| {
-            this.api_key_changed(cx)
-        }));
-        let title: SharedString = format!("{} API key", self.provider.name()).into();
-        // The builder can run again when the dialog layer is rebuilt; focus the
-        // field only the first time.
-        let initial_focus = std::cell::Cell::new(true);
-        window.open_dialog(cx, move |dialog, window, cx| {
-            if initial_focus.replace(false) {
-                let focus_handle = form.read(cx).input().read(cx).focus_handle(cx);
-                window.focus(&focus_handle, cx);
-            }
-            let save = form.clone();
-            dialog
-                .title(title.clone())
-                .child(form.clone())
-                // Enter saves; the dialog stays open until the key is saved.
-                .on_ok(move |_, window, cx| {
-                    save.update(cx, |form, cx| form.save(window, cx));
-                    false
-                })
-        });
     }
 
     /// Downloads the selected wallpaper into the library, into the folder its
@@ -701,7 +669,7 @@ impl WallhavenBrowser {
                     }
                     Err(error) => window.push_notification(
                         Notification::error(error.to_string())
-                            .title(format!("Couldn't download {id}")),
+                            .title(format!("Couldn’t download {id}")),
                         cx,
                     ),
                 }
@@ -878,7 +846,7 @@ impl WallhavenBrowser {
                 Toggle::new("hide-in-library")
                     .outline()
                     .small()
-                    .label("Hide In Library")
+                    .label("Hide in Library")
                     .checked(self.hide_in_library)
                     .tooltip("Leave out wallpapers the library already has")
                     .on_click(cx.listener(|this, checked: &bool, window, cx| {
@@ -894,19 +862,6 @@ impl WallhavenBrowser {
                         .child(count),
                 )
             })
-            .child(
-                Button::new("api-key")
-                    .ghost()
-                    .small()
-                    .label(if self.provider.has_api_key() {
-                        "API Key…"
-                    } else {
-                        "Add API Key…"
-                    })
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_api_key_dialog(window, cx)),
-                    ),
-            )
             .child(
                 Button::new("wallhaven-sort")
                     .ghost()
@@ -946,7 +901,7 @@ impl WallhavenBrowser {
                 if *rating == ContentRating::Nsfw && !has_key {
                     toggle
                         .disabled(true)
-                        .tooltip("Add an API key to show NSFW wallpapers")
+                        .tooltip("Add an API key in Settings to show NSFW wallpapers")
                 } else {
                     toggle
                 }
@@ -1058,7 +1013,7 @@ impl WallhavenBrowser {
                         Button::new("show-in-library")
                             .outline()
                             .small()
-                            .label("Show Them")
+                            .label("Show Hidden")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.set_hide_in_library(false, window, cx)
                             })),
@@ -1241,10 +1196,16 @@ impl WallhavenBrowser {
                 .small()
                 .label("Download")
                 .disabled(!available)
-                .tooltip(if available {
-                    "Download into the library (D)"
-                } else {
-                    "Choose a library folder to download into"
+                .map(|button| {
+                    if available {
+                        button.tooltip_with_action(
+                            "Download into the library",
+                            &DownloadSelected,
+                            Some(KEY_CONTEXT),
+                        )
+                    } else {
+                        button.tooltip("Choose a library folder in Settings to download into")
+                    }
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.download_selected(window, cx)))
                 .into_any_element()
@@ -1281,7 +1242,7 @@ mod tests {
 
     use backdrop_core::library::Library;
     use backdrop_core::paths::AppPaths;
-    use backdrop_core::providers::ContentRating;
+    use backdrop_core::providers::{ContentRating, Provider as _};
     use backdrop_core::settings::Settings;
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt as _;
@@ -1508,79 +1469,16 @@ mod tests {
         assert_eq!(searches[3].tag, None);
         assert_eq!(searches[3].text, "lakes");
     }
-    /// Opens the API key dialog from the toolbar and types `key` into it.
-    fn enter_api_key(fixture: &Fixture, key: &str, cx: &mut TestAppContext) {
-        cx.update_window(fixture.window, |_, window, cx| {
-            window.click("api-key", cx);
-            window.render_frame(cx);
-            window.input(key, cx);
-        })
-        .unwrap();
-    }
 
-    fn dialog_is_open(fixture: &Fixture, cx: &mut TestAppContext) -> bool {
-        cx.update_window(fixture.window, |_, window, cx| {
-            window.render_frame(cx);
-            window.try_find("api-key-input").is_some()
-        })
-        .unwrap()
-    }
-
-    fn saved_key(fixture: &Fixture) -> Option<String> {
-        Settings::load(&fixture.settings_file)
-            .unwrap()
-            .wallhaven_api_key()
-            .map(str::to_owned)
-    }
-
-    #[gpui_kit::test]
-    fn an_accepted_api_key_is_saved_and_used(cx: &mut TestAppContext) {
-        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
-
-        enter_api_key(&fixture, "abc123", cx);
-        press(&fixture, "enter", cx);
-
-        assert_eq!(saved_key(&fixture).as_deref(), Some("abc123"));
-        assert_eq!(fixture.provider.api_key().as_deref(), Some("abc123"));
-        assert!(!dialog_is_open(&fixture, cx));
-    }
-
-    #[gpui_kit::test]
-    fn a_rejected_api_key_stays_in_the_dialog(cx: &mut TestAppContext) {
-        let provider = FakeProvider::new(vec![vec!["aaa111"]]).rejecting("wrong");
-        let fixture = open_browser_with(provider, &[], false, cx);
-
-        enter_api_key(&fixture, "wrong", cx);
-        cx.update_window(fixture.window, |_, window, cx| {
-            window.click("save-api-key", cx)
-        })
-        .unwrap();
+    /// Sets the key as the settings page does, and tells the browser.
+    fn set_api_key(fixture: &Fixture, key: Option<&str>, cx: &mut TestAppContext) {
+        fixture.provider.set_api_key(key.map(str::to_owned));
+        fixture
+            .browser
+            .update(cx, |browser, cx| browser.api_key_changed(cx));
         cx.run_until_parked();
-
-        assert_eq!(saved_key(&fixture), None);
-        assert_eq!(fixture.provider.api_key(), None);
-        assert!(dialog_is_open(&fixture, cx));
     }
 
-    #[gpui_kit::test]
-    fn a_saved_api_key_can_be_removed(cx: &mut TestAppContext) {
-        let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
-        enter_api_key(&fixture, "abc123", cx);
-        press(&fixture, "enter", cx);
-
-        cx.update_window(fixture.window, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("api-key", cx);
-            window.render_frame(cx);
-            window.click("remove-api-key", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-
-        assert_eq!(saved_key(&fixture), None);
-        assert_eq!(fixture.provider.api_key(), None);
-        assert!(!dialog_is_open(&fixture, cx));
-    }
     fn click(fixture: &Fixture, id: &'static str, cx: &mut TestAppContext) {
         cx.update_window(fixture.window, |_, window, cx| {
             window.render_frame(cx);
@@ -1616,8 +1514,7 @@ mod tests {
         assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
         assert_eq!(fixture.provider.searches().len(), 1);
 
-        enter_api_key(&fixture, "abc123", cx);
-        press(&fixture, "enter", cx);
+        set_api_key(&fixture, Some("abc123"), cx);
         click(&fixture, "NSFW", cx);
 
         assert_eq!(
@@ -1637,13 +1534,11 @@ mod tests {
     #[gpui_kit::test]
     fn removing_the_api_key_turns_nsfw_off(cx: &mut TestAppContext) {
         let fixture = open_browser(vec![vec!["aaa111"]], &[], cx);
-        enter_api_key(&fixture, "abc123", cx);
-        press(&fixture, "enter", cx);
+        set_api_key(&fixture, Some("abc123"), cx);
         click(&fixture, "NSFW", cx);
         let searches = fixture.provider.searches().len();
 
-        click(&fixture, "api-key", cx);
-        click(&fixture, "remove-api-key", cx);
+        set_api_key(&fixture, None, cx);
 
         assert_eq!(ratings(&fixture, cx), [ContentRating::Sfw]);
         let all = fixture.provider.searches();

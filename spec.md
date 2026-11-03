@@ -211,7 +211,7 @@ The application should respect the filtering and authentication capabilities of 
 
 API keys and other credentials must not be stored in Git-synchronized metadata.
 
-A key is checked with the provider before it is saved, from the GUI (an API key dialog on the Wallhaven page) or the CLI (`backdrop wallhaven api-key set`). A key the provider rejects is not saved; one that can't be checked, for example offline, is saved with a warning. A saved key is never displayed again.
+A key is checked with the provider before it is saved, from the GUI (an API key dialog opened from the settings page) or the CLI (`backdrop wallhaven api-key set`). A key the provider rejects is not saved; one that can't be checked, for example offline, is saved with a warning. A saved key is never displayed again.
 
 ### 3.4 Detecting previously downloaded wallpapers
 

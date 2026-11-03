@@ -129,3 +129,55 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("d", DownloadSelected, Some(&wallhaven_detail_letters)),
     ]);
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{Action, KeyContext, TestAppContext};
+
+    use super::{
+        Back, DeleteSelected, Dismiss, DownloadSelected, SetWallpaper, ToggleFavorite, bind_keys,
+        image_detail, library_grid, wallhaven_browser, wallhaven_detail,
+    };
+
+    /// Tooltips name these shortcuts through the bindings, so each must
+    /// resolve in the context the tooltip passes, including the single-letter
+    /// ones bound only outside text fields.
+    #[gpui_kit::test]
+    fn tooltip_shortcuts_resolve(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            bind_keys(cx);
+        });
+        let window = cx.add_empty_window();
+        let shortcuts: [(&dyn Action, &str, &str); 9] = [
+            (&DeleteSelected, library_grid::KEY_CONTEXT, "delete"),
+            (&Dismiss, library_grid::KEY_CONTEXT, "escape"),
+            (&SetWallpaper, image_detail::KEY_CONTEXT, "w"),
+            (&ToggleFavorite, image_detail::KEY_CONTEXT, "f"),
+            (&DeleteSelected, image_detail::KEY_CONTEXT, "delete"),
+            (&Back, image_detail::KEY_CONTEXT, "escape"),
+            (&Back, wallhaven_detail::KEY_CONTEXT, "escape"),
+            (&DownloadSelected, wallhaven_browser::KEY_CONTEXT, "d"),
+            (&DownloadSelected, wallhaven_detail::KEY_CONTEXT, "d"),
+        ];
+        window.update(|window, _| {
+            for (action, context, key) in shortcuts {
+                // How `Kbd` finds the shortcut a tooltip shows.
+                let binding = window.highest_precedence_binding_for_action_in_context(
+                    action,
+                    KeyContext::parse(context).unwrap(),
+                );
+                let found = binding.and_then(|binding| {
+                    let keystroke = binding.keystrokes().first()?;
+                    Some(keystroke.key().to_owned())
+                });
+                assert_eq!(
+                    found.as_deref(),
+                    Some(key),
+                    "{} in {context}",
+                    action.name()
+                );
+            }
+        });
+    }
+}

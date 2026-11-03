@@ -1,4 +1,4 @@
-//! The Wallhaven API key form, shown in a dialog from the Wallhaven page.
+//! The Wallhaven API key form, shown in a dialog from the settings page.
 //!
 //! A key is checked with Wallhaven before it is saved. One Wallhaven rejects
 //! stays in the field with an explanation; one that can't be checked, for

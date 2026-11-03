@@ -337,10 +337,16 @@ impl WallhavenDetail {
                 .primary()
                 .label("Download")
                 .disabled(!available)
-                .tooltip(if available {
-                    "Download into the library (D)"
-                } else {
-                    "Choose a library folder to download into"
+                .map(|button| {
+                    if available {
+                        button.tooltip_with_action(
+                            "Download into the library",
+                            &DownloadSelected,
+                            Some(KEY_CONTEXT),
+                        )
+                    } else {
+                        button.tooltip("Choose a library folder in Settings to download into")
+                    }
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.download(window, cx)))
         };

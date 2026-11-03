@@ -357,7 +357,7 @@ impl ImageDetail {
                             .gap_2()
                             .text_color(muted)
                             .child(Icon::new(IconName::TriangleAlert))
-                            .child("Can't show this image")
+                            .child("Can’t show this image")
                             .into_any_element()
                     }),
             )
@@ -441,7 +441,11 @@ impl ImageDetail {
                                 })
                                 .disabled(is_current)
                                 .loading(setting_wallpaper)
-                                .tooltip("Show this image on the desktop (W)")
+                                .tooltip_with_action(
+                                    "Show this image on the desktop",
+                                    &SetWallpaper,
+                                    Some(KEY_CONTEXT),
+                                )
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.grid.update(cx, |grid, cx| {
                                         grid.set_selected_as_wallpaper(window, cx)
@@ -452,14 +456,13 @@ impl ImageDetail {
                     .child(
                         Button::new("favorite")
                             .outline()
-                            .icon(if favorite {
-                                IconName::StarFill
-                            } else {
-                                IconName::Star
-                            })
                             .label("Favorite")
                             .selected(favorite)
-                            .tooltip("Mark or unmark as a favorite (F)")
+                            .tooltip_with_action(
+                                "Mark or unmark as a favorite",
+                                &ToggleFavorite,
+                                Some(KEY_CONTEXT),
+                            )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.grid
                                     .update(cx, |grid, cx| grid.toggle_favorite(window, cx))
@@ -469,7 +472,6 @@ impl ImageDetail {
                         let file = file.clone();
                         Button::new("open")
                             .outline()
-                            .icon(IconName::ExternalLink)
                             .label("Open")
                             .tooltip("Open in the default image viewer")
                             .on_click(move |_, _, cx| cx.open_with_system(&file))
@@ -485,7 +487,11 @@ impl ImageDetail {
                             .danger()
                             .outline()
                             .label("Move to Trash…")
-                            .tooltip("Delete")
+                            .tooltip_with_action(
+                                "Move this image to the trash",
+                                &DeleteSelected,
+                                Some(KEY_CONTEXT),
+                            )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.grid
                                     .update(cx, |grid, cx| grid.confirm_delete_current(window, cx))
