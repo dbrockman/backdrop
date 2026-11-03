@@ -46,7 +46,7 @@ which it expects to find on your `PATH`.
 
 ## Development
 
-Backdrop is a Rust workspace built with [GPUI Kit](https://gpui-kit.com) 0.7.1.
+Backdrop is a Rust workspace built with [GPUI Kit](https://gpui-kit.com) 0.9.0.
 GPUI needs Wayland/X11, xkbcommon, Vulkan, and fontconfig, which `flake.nix`
 provides. `just` recipes enter the dev shell automatically; plain `cargo` must
 run inside `nix develop`.
