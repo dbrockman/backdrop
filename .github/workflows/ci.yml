@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Lint and test run as separate jobs so their (independent) builds run in
+# parallel. Both use the `ci` profile from Cargo.toml.
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      # The flake's dev shell provides the same Rust toolchain and the system
+      # libraries GPUI links against as local development.
+      - uses: cachix/install-nix-action@v31
+
+      - name: Prepare dev shell
+        run: nix develop --command rustc --version
+
+      # The toolchain comes from the flake, which rust-cache cannot see.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('flake.lock') }}
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: nix develop --command cargo fmt --all --check
+
+      - name: Clippy
+        run: nix develop --command cargo clippy --profile ci --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Prepare dev shell
+        run: nix develop --command rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('flake.lock') }}
+          cache-on-failure: true
+
+      - name: Test
+        run: nix develop --command cargo test --profile ci --workspace --locked

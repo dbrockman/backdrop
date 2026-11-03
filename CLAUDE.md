@@ -18,6 +18,8 @@ just check           # lint + test
 
 Single test: `just test -p backdrop-core files_live_in_their_xdg_directories`, or `nix develop -c cargo test -p backdrop cli::tests`.
 
+CI (`.github/workflows/ci.yml`) runs the same checks as `just check` in the dev shell, with the `ci` Cargo profile: unoptimized dependencies, because a cold build with `dev`'s opt-level 2 override is several times slower.
+
 The dev shell sets `LD_LIBRARY_PATH` because GPUI `dlopen`s Wayland, Vulkan, xkbcommon and fontconfig; keep `runtimeLibraries` in `flake.nix` in sync with what GPUI loads.
 
 `nix build` builds the installable package (`packages.default` in `flake.nix`, with the desktop file and SVG icon from `packaging/`, rendered to the hicolor PNG sizes at build time). Its check phase runs the whole workspace's tests in the Nix sandbox, so no test may need the network, `$HOME` or a real `noctalia`. `runtimeLibraries` feeds both the dev shell's `LD_LIBRARY_PATH` and the package's RPATH. The package `src` covers only `Cargo.toml`, `Cargo.lock` and `crates/`, so changes elsewhere don't invalidate the binary cache. The `Nix package` workflow pushes builds of `main` to the `dbrockman` Cachix cache.

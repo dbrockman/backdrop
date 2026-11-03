@@ -39,3 +39,13 @@ codegen-units = 1
 # GPUI is slow unoptimized; keep debug builds usable.
 [profile.dev.package."*"]
 opt-level = 2
+
+# CI only runs the tests, so it skips the dependency optimization above,
+# which makes a cold build several times slower. A custom profile inherits
+# the package overrides of the one it's based on, so reset them.
+[profile.ci]
+inherits = "dev"
+debug = "line-tables-only"
+
+[profile.ci.package."*"]
+opt-level = 0
