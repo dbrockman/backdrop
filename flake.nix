@@ -44,7 +44,10 @@
           cargoLock.lockFile = ./Cargo.lock;
 
           nativeBuildInputs = [ pkgs.pkg-config pkgs.resvg ];
-          buildInputs = runtimeLibraries pkgs;
+          # nixpkgs' cargo setup hook sets LIBSQLITE3_SYS_USE_PKG_CONFIG, which
+          # overrides rusqlite's `bundled` feature, so the package links nixpkgs'
+          # sqlite (the dev shell still builds the bundled one).
+          buildInputs = runtimeLibraries pkgs ++ [ pkgs.sqlite ];
 
           # default-members is only the binary's crate; test backdrop-core too.
           cargoTestFlags = [ "--workspace" ];
