@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.1.4](https://github.com/dbrockman/backdrop/compare/v0.1.3...v0.1.4) - 2026-11-18
+
+### Changed
+
+- Adapt to GPUI Kit 0.10.0 and update its skills
+
 ## [0.1.1](https://github.com/dbrockman/backdrop/compare/v0.1.0...v0.1.1) - 2026-11-03
 
 ### Changed
