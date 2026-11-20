@@ -27,7 +27,7 @@ jobs:
 
       # The flake's dev shell provides the same Rust toolchain and the system
       # libraries GPUI links against as local development.
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@v32
 
       - name: Prepare dev shell
         run: nix develop --command rustc --version
@@ -51,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@v32
 
       - name: Prepare dev shell
         run: nix develop --command rustc --version
